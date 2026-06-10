@@ -46,9 +46,12 @@ final class JarvisAssistantManager: ObservableObject {
         self.planner = planner
     }
 
-    func runTextCommand(_ userCommand: String) async {
+    @discardableResult
+    func runTextCommand(_ userCommand: String) async -> String {
         let plan = await previewPlan(for: userCommand)
-        guard !plan.toolCalls.isEmpty else { return }
+        guard !plan.toolCalls.isEmpty else {
+            return plan.assistantMessage ?? "Jarvis did not find a supported action for that command."
+        }
 
         var executionResults: [JarvisToolResult] = []
         state = .executing
@@ -59,7 +62,7 @@ final class JarvisAssistantManager: ObservableObject {
                 executionResults.append(failureResult)
                 lastToolResults = executionResults
                 state = .failed(failureResult.message)
-                return
+                return failureResult.message
             }
 
             let safetyDecision = safetyPolicy.evaluate(toolCall: toolCall, toolDefinition: tool.definition)
@@ -69,13 +72,13 @@ final class JarvisAssistantManager: ObservableObject {
             case .requireConfirmation(let reason):
                 lastToolResults = executionResults
                 state = .waitingForConfirmation(toolCall, reason: reason)
-                return
+                return "That needs confirmation first: \(reason)"
             case .block(let reason):
                 let failureResult = JarvisToolResult.failure(reason)
                 executionResults.append(failureResult)
                 lastToolResults = executionResults
                 state = .failed(reason)
-                return
+                return reason
             }
 
             let result = await tool.execute(
@@ -87,12 +90,13 @@ final class JarvisAssistantManager: ObservableObject {
 
             guard result.ok else {
                 state = .failed(result.message)
-                return
+                return result.message
             }
         }
 
         let completionMessage = executionResults.last?.message ?? plan.assistantMessage ?? "Done."
         state = .completed(completionMessage)
+        return completionMessage
     }
 
     func previewPlan(for userCommand: String) async -> JarvisPlan {

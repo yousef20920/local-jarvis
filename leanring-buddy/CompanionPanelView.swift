@@ -12,9 +12,14 @@ import SwiftUI
 
 struct CompanionPanelView: View {
     @ObservedObject var companionManager: CompanionManager
-    @StateObject private var jarvisAssistantManager = JarvisAssistantManager()
+    @ObservedObject private var jarvisAssistantManager: JarvisAssistantManager
     @State private var emailInput: String = ""
     @State private var jarvisCommandInput: String = ""
+
+    init(companionManager: CompanionManager) {
+        self._companionManager = ObservedObject(wrappedValue: companionManager)
+        self._jarvisAssistantManager = ObservedObject(wrappedValue: companionManager.jarvisAssistantManager)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {

@@ -19,7 +19,7 @@ LICENSE                  # Upstream MIT license notice
 
 ## Current Phase
 
-Phase 2 is complete. Jarvis now has a text-only command loop in the macOS panel.
+Phase 3 is complete. Jarvis now has both a text command loop in the macOS panel and a push-to-talk voice path using the same planner and tools.
 
 Current text commands include:
 
@@ -30,7 +30,7 @@ Current text commands include:
 5. `search for local LLMs for Mac`
 6. `take screenshot`
 
-The next phase is wiring the same Jarvis command loop to push-to-talk voice.
+The next phase is screen-aware actions, where Jarvis uses screenshot context before clicking or typing into specific UI elements.
 
 ## Attribution
 

@@ -275,13 +275,15 @@ take screenshot
 
 Goal: use the existing push-to-talk shortcut as the main activation path.
 
+Status: complete. Finalized push-to-talk transcripts now route through `JarvisAssistantManager.runTextCommand(_:)`, which uses the same planner, safety policy, and tool registry as the text command box. Jarvis speaks the execution result through the existing TTS client, with macOS system speech as a fallback.
+
 Tasks:
 
-1. Press and hold Control + Option to record.
-2. Transcribe the command.
-3. Send transcript to the Jarvis planner.
-4. Execute returned tool calls.
-5. Speak or display the result.
+1. Press and hold Control + Option to record. Done.
+2. Transcribe the command. Done.
+3. Send transcript to the Jarvis planner. Done.
+4. Execute returned tool calls. Done.
+5. Speak or display the result. Done.
 
 Success criteria:
 
@@ -289,6 +291,14 @@ Success criteria:
 Voice command: "Open Chrome"
 Jarvis opens Chrome.
 Jarvis says or displays: "Opened Chrome."
+```
+
+Stop commands:
+
+```text
+Jarvis, stop
+stop Jarvis
+stop
 ```
 
 ### Phase 4: Screen-Aware Actions

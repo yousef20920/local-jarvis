@@ -24,6 +24,6 @@ Phase 1 adds Jarvis software boundaries without changing the current app's runti
 
 ## Runtime Status
 
-Jarvis is scaffolded and the Phase 2 text command loop is wired into `CompanionPanelView`. Existing push-to-talk, Claude responses, overlay, and TTS behavior should remain unchanged.
+Jarvis is scaffolded, the Phase 2 text command loop is wired into `CompanionPanelView`, and Phase 3 routes finalized push-to-talk transcripts through the same Jarvis manager. The older Claude screenshot response pipeline still exists in `CompanionManager` but is no longer the default push-to-talk route.
 
-The next phase should send finalized voice transcripts through the same `JarvisAssistantManager.runTextCommand(_:)` path.
+The next phase should add screen-aware action planning before clicks and other UI-targeted actions.

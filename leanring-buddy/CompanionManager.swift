@@ -65,6 +65,7 @@ final class CompanionManager: ObservableObject {
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
+    let jarvisAssistantManager = JarvisAssistantManager()
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
@@ -521,7 +522,7 @@ final class CompanionManager: ObservableObject {
                         self?.lastTranscript = finalTranscript
                         print("🗣️ Companion received transcript: \(finalTranscript)")
                         ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
-                        self?.sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
+                        self?.handleFinalVoiceTranscript(finalTranscript)
                     }
                 )
             }
@@ -536,6 +537,68 @@ final class CompanionManager: ObservableObject {
             buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
         case .none:
             break
+        }
+    }
+
+    private func handleFinalVoiceTranscript(_ finalTranscript: String) {
+        let trimmedTranscript = finalTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTranscript.isEmpty else { return }
+
+        if shouldStopJarvis(for: trimmedTranscript) {
+            stopCurrentJarvisInteraction()
+            return
+        }
+
+        runJarvisCommandFromVoice(transcript: trimmedTranscript)
+    }
+
+    private func runJarvisCommandFromVoice(transcript: String) {
+        currentResponseTask?.cancel()
+        elevenLabsTTSClient.stopPlayback()
+
+        currentResponseTask = Task {
+            voiceState = .processing
+            let spokenStatus = await jarvisAssistantManager.runTextCommand(transcript)
+            guard !Task.isCancelled else { return }
+            await speakJarvisStatus(spokenStatus)
+
+            if !Task.isCancelled {
+                voiceState = .idle
+                scheduleTransientHideIfNeeded()
+            }
+        }
+    }
+
+    private func shouldStopJarvis(for transcript: String) -> Bool {
+        let normalizedTranscript = transcript.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalizedTranscript == "jarvis stop"
+            || normalizedTranscript == "jarvis, stop"
+            || normalizedTranscript == "stop jarvis"
+            || normalizedTranscript == "stop"
+    }
+
+    private func stopCurrentJarvisInteraction() {
+        currentResponseTask?.cancel()
+        currentResponseTask = nil
+        elevenLabsTTSClient.stopPlayback()
+        jarvisAssistantManager.stop()
+        clearDetectedElementLocation()
+        voiceState = .idle
+        scheduleTransientHideIfNeeded()
+    }
+
+    private func speakJarvisStatus(_ message: String) async {
+        let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedMessage.isEmpty else { return }
+
+        do {
+            try await elevenLabsTTSClient.speakText(trimmedMessage)
+            voiceState = .responding
+        } catch {
+            print("⚠️ Jarvis TTS error: \(error)")
+            let synthesizer = NSSpeechSynthesizer()
+            synthesizer.startSpeaking(trimmedMessage)
+            voiceState = .responding
         }
     }
 
