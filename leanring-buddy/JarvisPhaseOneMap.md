@@ -22,8 +22,8 @@ Phase 1 adds Jarvis software boundaries without changing the current app's runti
 | `JarvisToolRegistry.swift` | Holds available local macOS tools |
 | `JarvisSafetyPolicy.swift` | Decides whether a planned action can run, needs confirmation, or is blocked |
 
-## Phase 1 Runtime Status
+## Runtime Status
 
-Jarvis is scaffolded but not wired into `CompanionManager` yet. Existing launch, push-to-talk, Claude responses, overlay, and TTS behavior should remain unchanged.
+Jarvis is scaffolded and the Phase 2 text command loop is wired into `CompanionPanelView`. Existing push-to-talk, Claude responses, overlay, and TTS behavior should remain unchanged.
 
-The next phase should add a text-only debug command path that calls `JarvisAssistantManager.previewPlan(for:)` before any real tool execution is enabled.
+The next phase should send finalized voice transcripts through the same `JarvisAssistantManager.runTextCommand(_:)` path.

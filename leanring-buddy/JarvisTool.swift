@@ -60,6 +60,34 @@ enum JarvisToolArgumentValue: Equatable, Codable {
             try container.encode(value, forKey: .value)
         }
     }
+
+    var stringValue: String? {
+        if case .string(let value) = self {
+            return value
+        }
+        return nil
+    }
+
+    var numberValue: Double? {
+        if case .number(let value) = self {
+            return value
+        }
+        return nil
+    }
+
+    var booleanValue: Bool? {
+        if case .boolean(let value) = self {
+            return value
+        }
+        return nil
+    }
+
+    var stringArrayValue: [String]? {
+        if case .stringArray(let value) = self {
+            return value
+        }
+        return nil
+    }
 }
 
 struct JarvisToolDefinition: Equatable {

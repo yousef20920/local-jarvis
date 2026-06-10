@@ -243,13 +243,15 @@ Success criteria:
 
 Goal: make Jarvis work without voice first.
 
+Status: complete. The existing panel now has a Jarvis text command box wired to `JarvisAssistantManager.runTextCommand(_:)`. A rule-based planner supports the first safe commands, and Phase 2 macOS tools can open apps, type text, press hotkeys, and capture screenshots.
+
 Tasks:
 
-1. Add a developer command input UI or temporary debug command path.
-2. Send typed text to the assistant planner.
-3. Return structured tool calls.
-4. Execute safe local tools.
-5. Display structured results in the overlay or panel.
+1. Add a developer command input UI or temporary debug command path. Done.
+2. Send typed text to the assistant planner. Done.
+3. Return structured tool calls. Done.
+4. Execute safe local tools. Done.
+5. Display structured results in the overlay or panel. Done.
 
 Success criteria:
 
@@ -257,6 +259,16 @@ Success criteria:
 Typed command: "Open Chrome"
 Jarvis action: open_app("Google Chrome")
 Result: Chrome opens and Jarvis displays success.
+```
+
+Additional supported examples:
+
+```text
+open Safari
+type hello world
+press command space
+search for local LLMs for Mac
+take screenshot
 ```
 
 ### Phase 3: Keyboard Push-To-Talk Jarvis
@@ -319,7 +331,7 @@ Jarvis opens Chrome, types the search, presses Enter, and reports completion.
 
 ### Phase 6: Local-First AI Replacement
 
-Goal: make cloud dependencies replaceable with local modules.
+Goal: make cloud dependencies replaceable with local modules, use one of the gemma 4 models, we want to test those models that can run on raspberry pi.
 
 Tasks:
 

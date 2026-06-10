@@ -48,7 +48,7 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 
 **Transient Cursor Mode**: When "Show Clicky" is off, pressing the hotkey fades in the cursor overlay for the duration of the interaction (recording → response → TTS → optional pointing), then fades it out automatically after 1 second of inactivity. The user-facing name will be migrated to Jarvis in later phases.
 
-**Jarvis Software-Only Scaffolding**: Jarvis is being introduced as an isolated assistant/tool loop inside the existing macOS app before any Raspberry Pi hardware work. The Phase 1 files define planner, tool, registry, safety, and coordinator boundaries but are not wired into `CompanionManager`, so current runtime behavior remains unchanged.
+**Jarvis Software-Only Tool Loop**: Jarvis is being introduced as an isolated assistant/tool loop inside the existing macOS app before any Raspberry Pi hardware work. Phase 2 wires a text command box in `CompanionPanelView` to `JarvisAssistantManager`, a rule-based planner, the safety policy, and the first local macOS tools. Voice still uses the existing companion flow until Phase 3.
 
 ## Key Files
 
@@ -57,7 +57,7 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
 | `CompanionManager.swift` | ~1026 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, ElevenLabs TTS, and overlay management. Tracks voice state (idle/listening/processing/responding), conversation history, model selection, and cursor visibility. Coordinates the full push-to-talk → screenshot → Claude → TTS → pointing pipeline. |
 | `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
-| `CompanionPanelView.swift` | ~761 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
+| `CompanionPanelView.swift` | ~912 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), Jarvis text command box, permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
 | `OverlayWindow.swift` | ~881 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
 | `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for the response text bubble and waveform displayed next to the cursor in the overlay. |
 | `CompanionScreenCaptureUtility.swift` | ~132 | Multi-monitor screenshot capture using ScreenCaptureKit. Returns labeled image data for each connected display. |
@@ -76,11 +76,12 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
-| `JarvisAssistantManager.swift` | ~91 | Phase 1 Jarvis coordinator. Previews plans, applies safety decisions, tracks state, and stays disconnected from runtime app behavior until the text-only loop is added. |
-| `JarvisPlanner.swift` | ~39 | Planner protocol and Phase 1 placeholder planner for converting user commands into structured Jarvis plans. |
-| `JarvisTool.swift` | ~119 | Shared Jarvis tool contracts: argument values, tool definitions, tool calls, execution context, and structured results. |
-| `JarvisToolRegistry.swift` | ~35 | Registry for local macOS tools available to Jarvis. Starts empty until concrete tools are added. |
+| `JarvisAssistantManager.swift` | ~152 | Jarvis coordinator. Plans text commands, applies safety decisions, executes registered tools, and tracks result state for the panel. |
+| `JarvisPlanner.swift` | ~207 | Planner protocol plus the Phase 2 rule-based planner for first commands like open app, type text, press hotkey, search, and screenshot. |
+| `JarvisTool.swift` | ~147 | Shared Jarvis tool contracts: argument values, tool definitions, tool calls, execution context, structured results, and typed argument helpers. |
+| `JarvisToolRegistry.swift` | ~35 | Registry for local macOS tools available to Jarvis. Phase 2 registers the first app, keyboard, and screenshot tools through `JarvisPhaseTwoToolInstaller`. |
 | `JarvisSafetyPolicy.swift` | ~61 | Central allow/confirm/block decisions for planned Jarvis tool calls. |
+| `JarvisPhaseTwoTools.swift` | ~293 | First executable local tools for text-only Jarvis: open app, type text, press hotkeys, and take screenshots. |
 | `JarvisPhaseOneMap.md` | ~29 | Maps existing macOS app components to the Jarvis input, assistant, tool, output, and configuration layers. |
 | `worker/src/index.ts` | ~142 | Cloudflare Worker proxy. Three routes: `/chat` (Claude), `/tts` (ElevenLabs), `/transcribe-token` (AssemblyAI temp token). |
 

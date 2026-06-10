@@ -22,15 +22,18 @@ enum JarvisAssistantState: Equatable {
 final class JarvisAssistantManager: ObservableObject {
     @Published private(set) var state: JarvisAssistantState = .idle
     @Published private(set) var lastPlan: JarvisPlan?
+    @Published private(set) var lastToolResults: [JarvisToolResult] = []
 
     let toolRegistry: JarvisToolRegistry
     let safetyPolicy: JarvisSafetyPolicy
     private let planner: any JarvisPlanner
 
     init() {
-        self.toolRegistry = JarvisToolRegistry()
+        let toolRegistry = JarvisToolRegistry()
+        JarvisPhaseTwoToolInstaller.registerTools(in: toolRegistry)
+        self.toolRegistry = toolRegistry
         self.safetyPolicy = JarvisSafetyPolicy()
-        self.planner = JarvisPhaseOnePlanner()
+        self.planner = JarvisRuleBasedPlanner()
     }
 
     init(
@@ -43,6 +46,55 @@ final class JarvisAssistantManager: ObservableObject {
         self.planner = planner
     }
 
+    func runTextCommand(_ userCommand: String) async {
+        let plan = await previewPlan(for: userCommand)
+        guard !plan.toolCalls.isEmpty else { return }
+
+        var executionResults: [JarvisToolResult] = []
+        state = .executing
+
+        for toolCall in plan.toolCalls {
+            guard let tool = toolRegistry.tool(named: toolCall.toolName) else {
+                let failureResult = JarvisToolResult.failure("Tool not registered: \(toolCall.toolName).")
+                executionResults.append(failureResult)
+                lastToolResults = executionResults
+                state = .failed(failureResult.message)
+                return
+            }
+
+            let safetyDecision = safetyPolicy.evaluate(toolCall: toolCall, toolDefinition: tool.definition)
+            switch safetyDecision {
+            case .allow:
+                break
+            case .requireConfirmation(let reason):
+                lastToolResults = executionResults
+                state = .waitingForConfirmation(toolCall, reason: reason)
+                return
+            case .block(let reason):
+                let failureResult = JarvisToolResult.failure(reason)
+                executionResults.append(failureResult)
+                lastToolResults = executionResults
+                state = .failed(reason)
+                return
+            }
+
+            let result = await tool.execute(
+                arguments: toolCall.arguments,
+                context: JarvisToolExecutionContext(originalUserCommand: plan.userCommand, isDryRun: false)
+            )
+            executionResults.append(result)
+            lastToolResults = executionResults
+
+            guard result.ok else {
+                state = .failed(result.message)
+                return
+            }
+        }
+
+        let completionMessage = executionResults.last?.message ?? plan.assistantMessage ?? "Done."
+        state = .completed(completionMessage)
+    }
+
     func previewPlan(for userCommand: String) async -> JarvisPlan {
         let trimmedUserCommand = userCommand.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedUserCommand.isEmpty else {
@@ -51,10 +103,12 @@ final class JarvisAssistantManager: ObservableObject {
                 assistantMessage: "Jarvis needs a command before it can plan."
             )
             lastPlan = emptyPlan
+            lastToolResults = []
             return emptyPlan
         }
 
         state = .planning
+        lastToolResults = []
 
         let planningContext = JarvisPlanningContext(
             availableTools: toolRegistry.definitions,
@@ -78,6 +132,7 @@ final class JarvisAssistantManager: ObservableObject {
     func stop() {
         state = .idle
         lastPlan = nil
+        lastToolResults = []
     }
 
     private func firstConfirmationRequirement(in plan: JarvisPlan) -> (toolCall: JarvisToolCall, reason: String)? {

@@ -12,7 +12,9 @@ import SwiftUI
 
 struct CompanionPanelView: View {
     @ObservedObject var companionManager: CompanionManager
+    @StateObject private var jarvisAssistantManager = JarvisAssistantManager()
     @State private var emailInput: String = ""
+    @State private var jarvisCommandInput: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -30,6 +32,12 @@ struct CompanionPanelView: View {
                     .frame(height: 12)
 
                 modelPickerRow
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 16)
+
+                jarvisCommandSection
                     .padding(.horizontal, 16)
             }
 
@@ -79,6 +87,149 @@ struct CompanionPanelView: View {
         }
         .frame(width: 320)
         .background(panelBackground)
+    }
+
+    // MARK: - Jarvis Command
+
+    private var jarvisCommandSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("JARVIS")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundColor(DS.Colors.textTertiary)
+
+                Spacer()
+
+                Text(jarvisStateLabel)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(jarvisStateColor)
+            }
+
+            HStack(spacing: 8) {
+                TextField("Try: open Chrome", text: $jarvisCommandInput)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                            .fill(Color.white.opacity(0.08))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                            .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                    )
+                    .onSubmit {
+                        runJarvisCommand()
+                    }
+
+                Button(action: {
+                    runJarvisCommand()
+                }) {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(canRunJarvisCommand ? DS.Colors.accentText : DS.Colors.textTertiary)
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .pointerCursor(isEnabled: canRunJarvisCommand)
+                .disabled(!canRunJarvisCommand)
+            }
+
+            if let jarvisStatusMessage {
+                Text(jarvisStatusMessage)
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let plan = jarvisAssistantManager.lastPlan, !plan.toolCalls.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(plan.toolCalls) { toolCall in
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.circle")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(DS.Colors.textTertiary)
+                            Text(toolCall.userVisibleSummary)
+                                .font(.system(size: 10))
+                                .foregroundColor(DS.Colors.textTertiary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+        )
+    }
+
+    private var canRunJarvisCommand: Bool {
+        !jarvisCommandInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && jarvisStateLabel != "Running"
+    }
+
+    private var jarvisStatusMessage: String? {
+        switch jarvisAssistantManager.state {
+        case .idle:
+            return "Text-only tools: open apps, type text, press hotkeys, search, screenshot."
+        case .planning:
+            return "Planning command..."
+        case .executing:
+            return "Running command..."
+        case .waitingForConfirmation(_, let reason):
+            return "Needs confirmation: \(reason)"
+        case .completed(let message):
+            return message
+        case .failed(let message):
+            return message
+        }
+    }
+
+    private var jarvisStateLabel: String {
+        switch jarvisAssistantManager.state {
+        case .idle:
+            return "Ready"
+        case .planning, .executing:
+            return "Running"
+        case .waitingForConfirmation:
+            return "Confirm"
+        case .completed:
+            return "Done"
+        case .failed:
+            return "Error"
+        }
+    }
+
+    private var jarvisStateColor: Color {
+        switch jarvisAssistantManager.state {
+        case .idle:
+            return DS.Colors.textTertiary
+        case .planning, .executing:
+            return DS.Colors.accentText
+        case .waitingForConfirmation:
+            return DS.Colors.warning
+        case .completed:
+            return DS.Colors.success
+        case .failed:
+            return DS.Colors.destructiveText
+        }
+    }
+
+    private func runJarvisCommand() {
+        let commandToRun = jarvisCommandInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !commandToRun.isEmpty else { return }
+
+        Task {
+            await jarvisAssistantManager.runTextCommand(commandToRun)
+        }
     }
 
     // MARK: - Header

@@ -19,16 +19,18 @@ LICENSE                  # Upstream MIT license notice
 
 ## Current Phase
 
-Phase 1 is complete. Jarvis has isolated scaffolding for:
+Phase 2 is complete. Jarvis now has a text-only command loop in the macOS panel.
 
-1. assistant coordination
-2. planner contracts
-3. structured tool calls
-4. tool registry
-5. safety policy
-6. mapping existing macOS app pieces to Jarvis layers
+Current text commands include:
 
-The next phase is the text-only Jarvis tool loop.
+1. `open Chrome`
+2. `open Safari`
+3. `type hello world`
+4. `press command space`
+5. `search for local LLMs for Mac`
+6. `take screenshot`
+
+The next phase is wiring the same Jarvis command loop to push-to-talk voice.
 
 ## Attribution
 
