@@ -1,0 +1,3 @@
+[submodule "clicky"]
+	path = clicky
+	url = https://github.com/farzaa/clicky.git
