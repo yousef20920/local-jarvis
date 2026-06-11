@@ -52,20 +52,43 @@ class OverlayWindow: NSWindow {
     }
 }
 
-// Cursor-like triangle shape (equilateral)
-struct Triangle: Shape {
+// Sleek HUD chevron shape
+struct HUDChevron: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
-        let size = min(rect.width, rect.height)
-        let height = size * sqrt(3.0) / 2.0
-
-        // Top vertex
-        path.move(to: CGPoint(x: rect.midX, y: rect.midY - height / 1.5))
-        // Bottom left vertex
-        path.addLine(to: CGPoint(x: rect.midX - size / 2, y: rect.midY + height / 3))
-        // Bottom right vertex
-        path.addLine(to: CGPoint(x: rect.midX + size / 2, y: rect.midY + height / 3))
+        let width = rect.width
+        let height = rect.height
+        
+        path.move(to: CGPoint(x: width / 2, y: 0))
+        path.addLine(to: CGPoint(x: width, y: height * 0.85))
+        path.addLine(to: CGPoint(x: width / 2, y: height * 0.45))
+        path.addLine(to: CGPoint(x: 0, y: height * 0.85))
         path.closeSubpath()
+        return path
+    }
+}
+
+// Siri-like/holographic sine wave path with Gaussian-like tapering envelope
+struct SineWaveShape: Shape {
+    var phase: CGFloat
+    var amplitude: CGFloat
+    
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let width = rect.width
+        let height = rect.height
+        let midY = height / 2
+        
+        path.move(to: CGPoint(x: 0, y: midY))
+        
+        for x in stride(from: 0, to: width, by: 1) {
+            let relativeX = x / width
+            let envelope = sin(relativeX * .pi)
+            let sine = sin(relativeX * .pi * 2.5 + phase)
+            let y = midY + sine * amplitude * envelope
+            path.addLine(to: CGPoint(x: x, y: y))
+        }
+        
         return path
     }
 }
@@ -129,6 +152,7 @@ struct BlueCursorView: View {
     @State private var bubbleSize: CGSize = .zero
     @State private var bubbleOpacity: Double = 1.0
     @State private var cursorOpacity: Double = 0.0
+    @State private var idleHoverOffset: CGFloat = 0.0
 
     // MARK: - Buddy Navigation State
 
@@ -302,25 +326,49 @@ struct BlueCursorView: View {
             // During cursor following: fast spring animation for snappy tracking.
             // During navigation: NO implicit animation — the frame-by-frame bezier
             // timer controls position directly at 60fps for a smooth arc flight.
-            Triangle()
-                .fill(DS.Colors.overlayCursorBlue)
-                .frame(width: 16, height: 16)
-                .rotationEffect(.degrees(triangleRotationDegrees))
-                .shadow(color: DS.Colors.overlayCursorBlue, radius: 8 + (buddyFlightScale - 1.0) * 20, x: 0, y: 0)
-                .scaleEffect(buddyFlightScale)
-                .opacity(buddyIsVisibleOnThisScreen && (companionManager.voiceState == .idle || companionManager.voiceState == .responding) ? cursorOpacity : 0)
-                .position(cursorPosition)
-                .animation(
-                    buddyNavigationMode == .followingCursor
-                        ? .spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0)
-                        : nil,
-                    value: cursorPosition
-                )
-                .animation(.easeIn(duration: 0.25), value: companionManager.voiceState)
-                .animation(
-                    buddyNavigationMode == .navigatingToTarget ? nil : .easeInOut(duration: 0.3),
-                    value: triangleRotationDegrees
-                )
+            // Glowing Chevron & HUD Orbit Ring
+            ZStack {
+                // Outer HUD ring
+                Circle()
+                    .stroke(
+                        LinearGradient(
+                            colors: [DS.Colors.overlayCursorBlue.opacity(0.4), DS.Colors.overlayCursorBlue.opacity(0.05)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        style: StrokeStyle(lineWidth: 1.0, dash: [4, 4])
+                    )
+                    .frame(width: 26, height: 26)
+                
+                // Outer compass marker dot
+                Circle()
+                    .fill(DS.Colors.overlayCursorBlue.opacity(0.6))
+                    .frame(width: 3, height: 3)
+                    .offset(y: -13)
+                
+                // Glowing Chevron
+                HUDChevron()
+                    .fill(DS.Colors.overlayCursorBlue)
+                    .frame(width: 13, height: 13)
+                    .rotationEffect(.degrees(triangleRotationDegrees))
+                    .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.8), radius: 6)
+            }
+            .frame(width: 32, height: 32)
+            .scaleEffect(buddyFlightScale)
+            .offset(y: buddyNavigationMode == .followingCursor ? idleHoverOffset : 0)
+            .opacity(buddyIsVisibleOnThisScreen && (companionManager.voiceState == .idle || companionManager.voiceState == .responding) ? cursorOpacity : 0)
+            .position(cursorPosition)
+            .animation(
+                buddyNavigationMode == .followingCursor
+                    ? .spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0)
+                    : nil,
+                value: cursorPosition
+            )
+            .animation(.easeIn(duration: 0.25), value: companionManager.voiceState)
+            .animation(
+                buddyNavigationMode == .navigatingToTarget ? nil : .easeInOut(duration: 0.3),
+                value: triangleRotationDegrees
+            )
 
             // Blue waveform — replaces the triangle while listening
             BlueCursorWaveformView(audioPowerLevel: companionManager.currentAudioPowerLevel)
@@ -348,6 +396,11 @@ struct BlueCursorView: View {
             self.cursorPosition = CGPoint(x: swiftUIPosition.x + 35, y: swiftUIPosition.y + 25)
 
             startTrackingCursor()
+            
+            // Soft floating levitation animation when idle
+            withAnimation(.easeInOut(duration: 2.0).repeatForever(autoreverses: true)) {
+                self.idleHoverOffset = 3.0
+            }
 
             // Only show welcome message on first appearance (app start)
             // and only if the cursor starts on this screen
@@ -704,72 +757,80 @@ struct BlueCursorView: View {
 
 // MARK: - Blue Cursor Waveform
 
-/// A small blue waveform that replaces the triangle cursor while
-/// the user is holding the push-to-talk shortcut and speaking.
+/// A holographic sine wave oscillator that replaces the cursor while the user is speaking.
 private struct BlueCursorWaveformView: View {
     let audioPowerLevel: CGFloat
 
-    private let barCount = 5
-    private let listeningBarProfile: [CGFloat] = [0.4, 0.7, 1.0, 0.7, 0.4]
-
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 36.0)) { timelineContext in
-            HStack(alignment: .center, spacing: 2) {
-                ForEach(0..<barCount, id: \.self) { barIndex in
-                    RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                        .fill(DS.Colors.overlayCursorBlue)
-                        .frame(
-                            width: 2,
-                            height: barHeight(
-                                for: barIndex,
-                                timelineDate: timelineContext.date
-                            )
-                        )
-                }
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timelineContext in
+            let time = CGFloat(timelineContext.date.timeIntervalSinceReferenceDate)
+            
+            // Map the audio level (0..1) to amplitude.
+            // Ensure a small baseline amplitude so the wave ripples gently even when quiet.
+            let normalizedPower = max(audioPowerLevel - 0.008, 0)
+            let rawAmplitude = CGFloat(pow(min(normalizedPower * 3.0, 1.0), 0.75))
+            let targetAmplitude = 3.0 + rawAmplitude * 15.0
+            
+            ZStack {
+                // Wave 3 (deep background)
+                SineWaveShape(phase: time * 4.0, amplitude: targetAmplitude * 0.4)
+                    .stroke(DS.Colors.overlayCursorBlue.opacity(0.20), lineWidth: 1.0)
+                    .frame(width: 44, height: 24)
+                
+                // Wave 2 (middle background)
+                SineWaveShape(phase: -time * 5.0, amplitude: targetAmplitude * 0.65)
+                    .stroke(DS.Colors.overlayCursorBlue.opacity(0.40), lineWidth: 1.2)
+                    .frame(width: 44, height: 24)
+                
+                // Wave 1 (primary wave)
+                SineWaveShape(phase: time * 6.5, amplitude: targetAmplitude)
+                    .stroke(DS.Colors.overlayCursorBlue, lineWidth: 1.8)
+                    .frame(width: 44, height: 24)
+                    .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 4)
             }
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
-            .animation(.linear(duration: 0.08), value: audioPowerLevel)
+            .animation(.easeOut(duration: 0.1), value: audioPowerLevel)
         }
-    }
-
-    private func barHeight(for barIndex: Int, timelineDate: Date) -> CGFloat {
-        let animationPhase = CGFloat(timelineDate.timeIntervalSinceReferenceDate * 3.6) + CGFloat(barIndex) * 0.35
-        let normalizedAudioPowerLevel = max(audioPowerLevel - 0.008, 0)
-        let easedAudioPowerLevel = pow(min(normalizedAudioPowerLevel * 2.85, 1), 0.76)
-        let reactiveHeight = easedAudioPowerLevel * 10 * listeningBarProfile[barIndex]
-        let idlePulse = (sin(animationPhase) + 1) / 2 * 1.5
-        return 3 + reactiveHeight + idlePulse
     }
 }
 
 // MARK: - Blue Cursor Spinner
 
-/// A small blue spinning indicator that replaces the triangle cursor
-/// while the AI is processing a voice input.
+/// A concentric dual-ring HUD spinner that replaces the cursor while Jarvis computes.
 private struct BlueCursorSpinnerView: View {
-    @State private var isSpinning = false
+    @State private var outerSpinAngle = 0.0
+    @State private var innerSpinAngle = 0.0
 
     var body: some View {
-        Circle()
-            .trim(from: 0.15, to: 0.85)
-            .stroke(
-                AngularGradient(
-                    colors: [
-                        DS.Colors.overlayCursorBlue.opacity(0.0),
-                        DS.Colors.overlayCursorBlue
-                    ],
-                    center: .center
-                ),
-                style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
-            )
-            .frame(width: 14, height: 14)
-            .rotationEffect(.degrees(isSpinning ? 360 : 0))
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
-            .onAppear {
-                withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) {
-                    isSpinning = true
-                }
+        ZStack {
+            // Outer dashed ring (clockwise)
+            Circle()
+                .stroke(
+                    DS.Colors.overlayCursorBlue.opacity(0.7),
+                    style: StrokeStyle(lineWidth: 1.0, lineCap: .round, dash: [3, 4])
+                )
+                .frame(width: 22, height: 22)
+                .rotationEffect(.degrees(outerSpinAngle))
+                .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.4), radius: 3)
+
+            // Inner segmented ring (counter-clockwise)
+            Circle()
+                .trim(from: 0.1, to: 0.85)
+                .stroke(
+                    DS.Colors.overlayCursorBlue,
+                    style: StrokeStyle(lineWidth: 1.8, lineCap: .round)
+                )
+                .frame(width: 13, height: 13)
+                .rotationEffect(.degrees(innerSpinAngle))
+                .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 2)
+        }
+        .onAppear {
+            withAnimation(.linear(duration: 2.0).repeatForever(autoreverses: false)) {
+                outerSpinAngle = 360.0
             }
+            withAnimation(.linear(duration: 1.2).repeatForever(autoreverses: false)) {
+                innerSpinAngle = -360.0
+            }
+        }
     }
 }
 

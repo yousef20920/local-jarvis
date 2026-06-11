@@ -99,31 +99,36 @@ struct CompanionPanelView: View {
     private var jarvisCommandSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("JARVIS")
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                Text("JARVIS CONSOLE")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .foregroundColor(DS.Colors.textTertiary)
 
                 Spacer()
 
-                Text(jarvisStateLabel)
-                    .font(.system(size: 10, weight: .medium))
+                Text("[ \(jarvisStateLabel.uppercased()) ]")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .foregroundColor(jarvisStateColor)
             }
 
             HStack(spacing: 8) {
                 TextField("Try: open Chrome", text: $jarvisCommandInput)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12))
+                    .font(.system(size: 12, design: .monospaced))
                     .foregroundColor(DS.Colors.textPrimary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
                     .background(
                         RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                            .fill(Color.white.opacity(0.08))
+                            .fill(Color.black.opacity(0.2))
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                            .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                            .stroke(
+                                jarvisCommandInput.isEmpty
+                                    ? DS.Colors.borderSubtle
+                                    : DS.Colors.accentText.opacity(0.6),
+                                lineWidth: 0.8
+                            )
                     )
                     .onSubmit {
                         runJarvisCommand()
@@ -132,10 +137,11 @@ struct CompanionPanelView: View {
                 Button(action: {
                     runJarvisCommand()
                 }) {
-                    Image(systemName: "arrow.up.circle.fill")
+                    Image(systemName: "chevron.right.circle.fill")
                         .font(.system(size: 20, weight: .semibold))
                         .foregroundColor(canRunJarvisCommand ? DS.Colors.accentText : DS.Colors.textTertiary)
                         .frame(width: 28, height: 28)
+                        .shadow(color: canRunJarvisCommand ? DS.Colors.accentText.opacity(0.4) : Color.clear, radius: 4)
                 }
                 .buttonStyle(.plain)
                 .pointerCursor(isEnabled: canRunJarvisCommand)
@@ -143,21 +149,21 @@ struct CompanionPanelView: View {
             }
 
             if let jarvisStatusMessage {
-                Text(jarvisStatusMessage)
-                    .font(.system(size: 11))
-                    .foregroundColor(DS.Colors.textTertiary)
+                Text("> \(jarvisStatusMessage)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(DS.Colors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if let plan = jarvisAssistantManager.lastPlan, !plan.toolCalls.isEmpty {
+            if let workflow = jarvisAssistantManager.currentWorkflow, !workflow.steps.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(plan.toolCalls) { toolCall in
+                    ForEach(workflow.steps) { workflowStep in
                         HStack(spacing: 6) {
-                            Image(systemName: "checkmark.circle")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundColor(DS.Colors.textTertiary)
-                            Text(toolCall.userVisibleSummary)
-                                .font(.system(size: 10))
+                            Image(systemName: iconName(for: workflowStep.status))
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(color(for: workflowStep.status))
+                            Text(workflowStep.toolCall.userVisibleSummary)
+                                .font(.system(size: 10, design: .monospaced))
                                 .foregroundColor(DS.Colors.textTertiary)
                                 .lineLimit(1)
                         }
@@ -168,7 +174,7 @@ struct CompanionPanelView: View {
         .padding(10)
         .background(
             RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                .fill(Color.white.opacity(0.05))
+                .fill(Color.white.opacity(0.03))
         )
         .overlay(
             RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
@@ -184,11 +190,11 @@ struct CompanionPanelView: View {
     private var jarvisStatusMessage: String? {
         switch jarvisAssistantManager.state {
         case .idle:
-            return "Text-only tools: open apps, type text, press hotkeys, search, screenshot."
+            return "Ready for local Mac control."
         case .planning:
             return "Planning command..."
-        case .executing:
-            return "Running command..."
+        case .executing(let currentStep, let totalSteps, let summary):
+            return "Step \(currentStep)/\(totalSteps): \(summary)"
         case .waitingForConfirmation(_, let reason):
             return "Needs confirmation: \(reason)"
         case .completed(let message):
@@ -237,19 +243,50 @@ struct CompanionPanelView: View {
         }
     }
 
+    private func iconName(for status: JarvisWorkflowStepStatus) -> String {
+        switch status {
+        case .pending:
+            return "circle"
+        case .running:
+            return "play.circle.fill"
+        case .succeeded:
+            return "checkmark.circle.fill"
+        case .failed:
+            return "xmark.circle.fill"
+        }
+    }
+
+    private func color(for status: JarvisWorkflowStepStatus) -> Color {
+        switch status {
+        case .pending:
+            return DS.Colors.textTertiary
+        case .running:
+            return DS.Colors.accentText
+        case .succeeded:
+            return DS.Colors.success
+        case .failed:
+            return DS.Colors.destructiveText
+        }
+    }
+
     // MARK: - Header
 
     private var panelHeader: some View {
         HStack {
             HStack(spacing: 8) {
-                // Animated status dot
-                Circle()
-                    .fill(statusDotColor)
-                    .frame(width: 8, height: 8)
-                    .shadow(color: statusDotColor.opacity(0.6), radius: 4)
+                // Animated ARC reactor status dot
+                ZStack {
+                    Circle()
+                        .stroke(statusDotColor.opacity(0.35), lineWidth: 1.2)
+                        .frame(width: 12, height: 12)
+                    Circle()
+                        .fill(statusDotColor)
+                        .frame(width: 6, height: 6)
+                }
+                .shadow(color: statusDotColor.opacity(0.8), radius: 3)
 
-                Text("Clicky")
-                    .font(.system(size: 14, weight: .semibold))
+                Text("JARVIS")
+                    .font(.system(size: 13, weight: .bold, design: .monospaced))
                     .foregroundColor(DS.Colors.textPrimary)
             }
 
@@ -317,18 +354,18 @@ struct CompanionPanelView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Hi, I'm Farza. This is Clicky.")
-                    .font(.system(size: 12, weight: .bold))
+                Text("JARVIS ACTIVATION SETUP")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
                     .foregroundColor(DS.Colors.textSecondary)
 
-                Text("A side project I made for fun to help me learn stuff as I use my computer.")
+                Text("Welcome. Let's initialize and establish direct controls on this Mac.")
                     .font(.system(size: 11))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text("Nothing runs in the background. Clicky will only take a screenshot when you press the hot key. So, you can give that permission in peace. If you are still sus, eh, I can't do much there champ.")
+                Text("Permissions are handled locally. Screen and audio input are only processed when the push-to-talk key is active. All commands run in-process.")
                     .font(.system(size: 11))
-                    .foregroundColor(Color(red: 0.9, green: 0.4, blue: 0.4))
+                    .foregroundColor(DS.Colors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -755,42 +792,71 @@ struct CompanionPanelView: View {
     // MARK: - Model Picker
 
     private var modelPickerRow: some View {
-        HStack {
-            Text("Model")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("LOCAL AGENT MODEL")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundColor(DS.Colors.textSecondary)
 
-            Spacer()
+                Spacer()
 
-            HStack(spacing: 0) {
-                modelOptionButton(label: "Sonnet", modelID: "claude-sonnet-4-6")
-                modelOptionButton(label: "Opus", modelID: "claude-opus-4-6")
+                HStack(spacing: 0) {
+                    modelOptionButton(label: "Qwen3-VL 8B", modelID: "qwen3-vl:8b-instruct")
+                    modelOptionButton(label: "Qwen3-VL 4B", modelID: "qwen3-vl:4b-instruct")
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.white.opacity(0.04))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                )
             }
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.white.opacity(0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
-            )
+
+            HStack {
+                Text("LOCAL VISION MODEL")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundColor(DS.Colors.textSecondary)
+
+                Spacer()
+
+                Text(companionManager.selectedLocalVisionModel)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(DS.Colors.accentText.opacity(0.15))
+                    )
+            }
+
+            Text("Fast path: rules    Agent loop + vision: \(companionManager.selectedLocalVisionModel)")
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundColor(DS.Colors.textTertiary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.vertical, 4)
     }
 
     private func modelOptionButton(label: String, modelID: String) -> some View {
-        let isSelected = companionManager.selectedModel == modelID
+        let isSelected = companionManager.selectedLocalLLMModel == modelID
         return Button(action: {
-            companionManager.setSelectedModel(modelID)
+            // One multimodal model drives routing, the agent loop, and vision,
+            // so selecting a model updates both the text and vision settings.
+            companionManager.setSelectedLocalLLMModel(modelID)
+            companionManager.setSelectedLocalVisionModel(modelID)
         }) {
             Text(label)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
                 .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
+                        .fill(isSelected ? DS.Colors.accentText.opacity(0.15) : Color.clear)
                 )
         }
         .buttonStyle(.plain)
@@ -844,8 +910,8 @@ struct CompanionPanelView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "power")
                         .font(.system(size: 11, weight: .medium))
-                    Text("Quit Clicky")
-                        .font(.system(size: 12, weight: .medium))
+                    Text("Shutdown JARVIS")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
                 }
                 .foregroundColor(DS.Colors.textTertiary)
             }
@@ -875,10 +941,29 @@ struct CompanionPanelView: View {
     // MARK: - Visual Helpers
 
     private var panelBackground: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(DS.Colors.background)
-            .shadow(color: Color.black.opacity(0.5), radius: 20, x: 0, y: 10)
-            .shadow(color: Color.black.opacity(0.3), radius: 4, x: 0, y: 2)
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .fill(.ultraThinMaterial)
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(DS.Colors.background.opacity(0.65))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                DS.Colors.accentText.opacity(0.35),
+                                DS.Colors.warning.opacity(0.15),
+                                DS.Colors.accentText.opacity(0.1)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 0.8
+                    )
+            )
+            .shadow(color: Color.black.opacity(0.55), radius: 24, x: 0, y: 12)
+            .shadow(color: Color.black.opacity(0.35), radius: 6, x: 0, y: 3)
     }
 
     private var statusDotColor: Color {

@@ -48,16 +48,16 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 
 **Transient Cursor Mode**: When "Show Clicky" is off, pressing the hotkey fades in the cursor overlay for the duration of the interaction (recording → response → TTS → optional pointing), then fades it out automatically after 1 second of inactivity. The user-facing name will be migrated to Jarvis in later phases.
 
-**Jarvis Software-Only Tool Loop**: Jarvis is being introduced as an isolated assistant/tool loop inside the existing macOS app before any Raspberry Pi hardware work. Phase 3 routes both the text command box and finalized push-to-talk transcripts through `JarvisAssistantManager`, a rule-based planner, the safety policy, and the first local macOS tools.
+**Jarvis Computer-Use Agent Loop**: Jarvis executes commands through a local observe-act loop instead of planning everything upfront. Each iteration captures a fresh screenshot, asks the local Qwen3-VL model (via Ollama) for the single next action on a relative 1000x1000 coordinate grid, maps coordinates to global screen points, gates the action through the safety policy, executes it, and repeats (max 15 steps) until the model terminates, answers, or the user cancels. A single multimodal model (`qwen3-vl:8b-instruct` default — the bare `qwen3-vl:8b` tag is the thinking variant, which is far too slow and returns empty JSON content) handles voice intent routing, agent turns, and screen-aware answers. Ollama must run natively (the menu bar app), not in Docker: Docker on macOS has no GPU access, making 8B vision inference take minutes instead of seconds. Screen-independent commands (open app, hotkey, type, screenshot) still run instantly through the deterministic rule planner without any model call. Failed actions do not abort the run — the model sees the failure in its history plus a fresh screenshot and can try another way.
 
 ## Key Files
 
 | File | Lines | Purpose |
 |------|-------|---------|
 | `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~1089 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, ElevenLabs TTS, Jarvis voice routing, and overlay management. Tracks voice state (idle/listening/processing/responding), conversation history, model selection, and cursor visibility. Push-to-talk transcripts now route through the Jarvis tool loop. |
+| `CompanionManager.swift` | ~1142 | Central state machine. Owns dictation, shortcut monitoring, screen capture, local Jarvis voice routing, local system speech responses, and overlay management. Tracks voice state (idle/listening/processing/responding), conversation history, local model selection, and cursor visibility. Push-to-talk transcripts route through the Jarvis computer-use agent loop. Vision answers can escalate to a one-shot browser search via a `[SEARCH:query]` tag when the requested live information is not on screen. |
 | `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
-| `CompanionPanelView.swift` | ~917 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), Jarvis text command box, permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
+| `CompanionPanelView.swift` | ~973 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), Jarvis text command box with workflow progress, permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
 | `OverlayWindow.swift` | ~881 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
 | `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for the response text bubble and waveform displayed next to the cursor in the overlay. |
 | `CompanionScreenCaptureUtility.swift` | ~132 | Multi-monitor screenshot capture using ScreenCaptureKit. Returns labeled image data for each connected display. |
@@ -71,19 +71,27 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `ClaudeAPI.swift` | ~291 | Claude vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
 | `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
 | `ElevenLabsTTSClient.swift` | ~81 | ElevenLabs TTS client. Sends text to the Worker proxy, plays back audio via `AVAudioPlayer`. Exposes `isPlaying` for transient cursor scheduling. |
-| `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |
+| `ElementLocationDetector.swift` | ~182 | Legacy screenshot element detector (local Ollama vision). No longer on the active Jarvis path — the computer-use agent grounds its own clicks. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
 | `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
-| `JarvisAssistantManager.swift` | ~156 | Jarvis coordinator. Plans text/voice commands, applies safety decisions, executes registered tools, returns spoken summaries, and tracks result state for the panel. |
-| `JarvisPlanner.swift` | ~207 | Planner protocol plus the Phase 2 rule-based planner for first commands like open app, type text, press hotkey, search, and screenshot. |
+| `JarvisAssistantManager.swift` | ~271 | Jarvis coordinator. Screen-independent commands run through the deterministic rule planner for instant execution; everything else runs through the computer-use agent loop. Mirrors agent progress into observable workflow state for the panel and returns explicit spoken results. |
+| `JarvisComputerUseAgent.swift` | ~507 | Local observe-act agent loop. Captures a fresh screenshot each step, asks Qwen3-VL for the single next action (1000x1000 relative coordinate grid), maps coordinates to global screen points, applies the safety policy, executes, and repeats up to 15 steps. Terminal actions: answer, terminate. |
+| `JarvisComputerUseTools.swift` | ~340 | Mouse, scroll, and timing tools completing the human-equivalent action set: double_click, right_click, drag, move_mouse, scroll, and wait. CGEvent-based, converting AppKit global coordinates to Quartz before posting. |
+| `JarvisDebugLogger.swift` | ~55 | Verbose console logging for the Jarvis pipeline. All lines use the `🐛 [Jarvis:<category>]` prefix for Xcode console filtering. |
+| `JarvisPlanner.swift` | ~292 | Planner protocol plus the rule-based planner for screen-independent fast-path commands like open app, type text, press hotkey, search, and screenshot. |
+| `JarvisLocalLLMClient.swift` | ~330 | Ollama-compatible local LLM client. Defaults to `qwen3-vl:8b-instruct` for both text and vision, reads model/base URL overrides from UserDefaults (migrating legacy/thinking tags away), and provides the JSON-enforced computer-use agent turn call used by both the agent loop and the voice intent router. |
+| `JarvisLocalLLMPlanner.swift` | ~200 | Legacy one-shot local planner (rules then Ollama JSON planning). No longer on the active path — superseded by the computer-use agent loop. |
+| `JarvisClaudePlannerClient.swift` | ~120 | Legacy cloud fallback planner client. Not used on the active local-first path. |
+| `JarvisVoiceIntentRouter.swift` | ~153 | Local LLM router classifying spoken transcripts as action, vision, or action-then-vision before dispatching to the agent loop or the screen-aware companion response. |
+| `JarvisWorkflowState.swift` | ~53 | Observable multi-step workflow model with per-step pending/running/succeeded/failed state. |
 | `JarvisTool.swift` | ~147 | Shared Jarvis tool contracts: argument values, tool definitions, tool calls, execution context, structured results, and typed argument helpers. |
 | `JarvisToolRegistry.swift` | ~35 | Registry for local macOS tools available to Jarvis. Phase 2 registers the first app, keyboard, and screenshot tools through `JarvisPhaseTwoToolInstaller`. |
 | `JarvisSafetyPolicy.swift` | ~61 | Central allow/confirm/block decisions for planned Jarvis tool calls. |
-| `JarvisPhaseTwoTools.swift` | ~293 | First executable local tools for text-only Jarvis: open app, type text, press hotkeys, and take screenshots. |
+| `JarvisPhaseTwoTools.swift` | ~351 | Core executable local tools for Jarvis: open app, type text, press hotkeys, take screenshots, and click screen coordinates. Its installer also registers the computer-use tools from `JarvisComputerUseTools.swift`. |
 | `JarvisPhaseOneMap.md` | ~29 | Maps existing macOS app components to the Jarvis input, assistant, tool, output, and configuration layers. |
-| `worker/src/index.ts` | ~142 | Cloudflare Worker proxy. Three routes: `/chat` (Claude), `/tts` (ElevenLabs), `/transcribe-token` (AssemblyAI temp token). |
+| `worker/src/index.ts` | ~178 | Cloudflare Worker proxy. Routes: `/chat` (Claude), `/detect-element` (Claude Computer Use), `/tts` (ElevenLabs), `/transcribe-token` (AssemblyAI temp token). |
 
 ## Build & Run
 

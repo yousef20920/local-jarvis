@@ -32,7 +32,7 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var hasScreenContentPermission = false
 
     /// Screen location (global AppKit coords) of a detected UI element the
-    /// buddy should fly to and point at. Parsed from Claude's response;
+    /// buddy should fly to and point at. Parsed from the local vision response;
     /// observed by BlueCursorView to trigger the flight animation.
     @Published var detectedElementScreenLocation: CGPoint?
     /// The display frame (global AppKit coords) of the screen the detected
@@ -65,24 +65,21 @@ final class CompanionManager: ObservableObject {
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
-    let jarvisAssistantManager = JarvisAssistantManager()
+    lazy var jarvisAssistantManager = JarvisAssistantManager(
+        toolVisualizationProvider: { [weak self] toolCall in
+            await self?.visualizeJarvisToolExecution(toolCall)
+        }
+    )
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
-    /// Base URL for the Cloudflare Worker proxy. All API requests route
-    /// through this so keys never ship in the app binary.
-    private static let workerBaseURL = "https://your-worker-name.your-subdomain.workers.dev"
+    /// Local Ollama client used for the screen-aware companion voice response.
+    private let localLLMVisionClient = JarvisLocalLLMClient()
+    private let voiceIntentRouter = JarvisVoiceIntentRouter()
+    private var localSpeechSynthesizer: NSSpeechSynthesizer?
 
-    private lazy var claudeAPI: ClaudeAPI = {
-        return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
-    }()
-
-    private lazy var elevenLabsTTSClient: ElevenLabsTTSClient = {
-        return ElevenLabsTTSClient(proxyURL: "\(Self.workerBaseURL)/tts")
-    }()
-
-    /// Conversation history so Claude remembers prior exchanges within a session.
-    /// Each entry is the user's transcript and Claude's response.
+    /// Conversation history so the local companion model remembers prior exchanges within a session.
+    /// Each entry is the user's transcript and the local assistant response.
     private var conversationHistory: [(userTranscript: String, assistantResponse: String)] = []
 
     /// The currently running AI response task, if any. Cancelled when the user
@@ -108,13 +105,20 @@ final class CompanionManager: ObservableObject {
     /// Used by the panel to show accurate status text ("Active" vs "Ready").
     @Published private(set) var isOverlayVisible: Bool = false
 
-    /// The Claude model used for voice responses. Persisted to UserDefaults.
-    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
+    @Published var selectedLocalLLMModel: String = JarvisLocalLLMConfiguration.storedModelName(forKey: "jarvisLocalLLMModel")
+        ?? JarvisLocalLLMConfiguration.defaultModelName
 
-    func setSelectedModel(_ model: String) {
-        selectedModel = model
-        UserDefaults.standard.set(model, forKey: "selectedClaudeModel")
-        claudeAPI.model = model
+    func setSelectedLocalLLMModel(_ model: String) {
+        selectedLocalLLMModel = model
+        UserDefaults.standard.set(model, forKey: "jarvisLocalLLMModel")
+    }
+
+    @Published var selectedLocalVisionModel: String = JarvisLocalLLMConfiguration.storedModelName(forKey: "jarvisLocalVisionModel")
+        ?? JarvisLocalLLMConfiguration.defaultModelName
+
+    func setSelectedLocalVisionModel(_ model: String) {
+        selectedLocalVisionModel = model
+        UserDefaults.standard.set(model, forKey: "jarvisLocalVisionModel")
     }
 
     /// User preference for whether the Clicky cursor should be shown.
@@ -180,10 +184,6 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
-        // Eagerly touch the Claude API so its TLS warmup handshake completes
-        // well before the onboarding demo fires at ~40s into the video.
-        _ = claudeAPI
-
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
         // were revoked (e.g. signing change), don't show the cursor — the
@@ -494,7 +494,7 @@ final class CompanionManager: ObservableObject {
 
             // Cancel any in-progress response and TTS from a previous utterance
             currentResponseTask?.cancel()
-            elevenLabsTTSClient.stopPlayback()
+            localSpeechSynthesizer?.stopSpeaking()
             clearDetectedElementLocation()
 
             // Dismiss the onboarding prompt if it's showing
@@ -554,12 +554,32 @@ final class CompanionManager: ObservableObject {
 
     private func runJarvisCommandFromVoice(transcript: String) {
         currentResponseTask?.cancel()
-        elevenLabsTTSClient.stopPlayback()
+        localSpeechSynthesizer?.stopSpeaking()
 
         currentResponseTask = Task {
             voiceState = .processing
-            let spokenStatus = await jarvisAssistantManager.runTextCommand(transcript)
+            let intentDecision = await voiceIntentRouter.route(transcript: transcript)
+            if intentDecision.route == .vision {
+                JarvisDebugLogger.log("Voice", "vision: \"\(intentDecision.visionPrompt)\"")
+                sendTranscriptToLocalVisionWithScreenshot(transcript: intentDecision.visionPrompt)
+                return
+            }
+
+            // Action commands run through the computer-use agent loop, which
+            // always returns an explicit result: a completion summary, a
+            // spoken answer, or a clear failure message. No silent fallback.
+            JarvisDebugLogger.log("Voice", "action: \"\(intentDecision.actionCommand)\"")
+            let spokenStatus = await jarvisAssistantManager.runTextCommand(intentDecision.actionCommand)
             guard !Task.isCancelled else { return }
+
+            if intentDecision.route == .actionThenVision {
+                JarvisDebugLogger.logVerbose("Voice", "action_then_vision follow-up: \"\(intentDecision.visionPrompt)\"")
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled else { return }
+                sendTranscriptToLocalVisionWithScreenshot(transcript: intentDecision.visionPrompt)
+                return
+            }
+
             await speakJarvisStatus(spokenStatus)
 
             if !Task.isCancelled {
@@ -580,7 +600,7 @@ final class CompanionManager: ObservableObject {
     private func stopCurrentJarvisInteraction() {
         currentResponseTask?.cancel()
         currentResponseTask = nil
-        elevenLabsTTSClient.stopPlayback()
+        localSpeechSynthesizer?.stopSpeaking()
         jarvisAssistantManager.stop()
         clearDetectedElementLocation()
         voiceState = .idle
@@ -591,24 +611,65 @@ final class CompanionManager: ObservableObject {
         let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedMessage.isEmpty else { return }
 
-        do {
-            try await elevenLabsTTSClient.speakText(trimmedMessage)
-            voiceState = .responding
-        } catch {
-            print("⚠️ Jarvis TTS error: \(error)")
-            let synthesizer = NSSpeechSynthesizer()
-            synthesizer.startSpeaking(trimmedMessage)
-            voiceState = .responding
+        print("🗣️ Jarvis said: \(trimmedMessage)")
+        localSpeechSynthesizer?.stopSpeaking()
+        let synthesizer = NSSpeechSynthesizer()
+        localSpeechSynthesizer = synthesizer
+        synthesizer.startSpeaking(trimmedMessage)
+        voiceState = .responding
+    }
+
+    /// Flies the blue cursor to the target before pointer-based agent actions
+    /// (clicks, drags, mouse moves) so the user can see where Jarvis is about to act.
+    private func visualizeJarvisToolExecution(_ toolCall: JarvisToolCall) async {
+        let pointerToolNames: Set<String> = ["click_at", "double_click", "right_click", "move_mouse", "drag"]
+        guard pointerToolNames.contains(toolCall.toolName),
+              let x = toolCall.arguments["x"]?.numberValue,
+              let y = toolCall.arguments["y"]?.numberValue else {
+            return
         }
+
+        let clickLocation = CGPoint(x: x, y: y)
+        let inferredDisplayFrame = NSScreen.screens.first { $0.frame.contains(clickLocation) }?.frame
+            ?? NSScreen.main?.frame
+            ?? .zero
+        let displayFrame = CGRect(
+            x: toolCall.arguments["display_frame_x"]?.numberValue ?? inferredDisplayFrame.origin.x,
+            y: toolCall.arguments["display_frame_y"]?.numberValue ?? inferredDisplayFrame.origin.y,
+            width: toolCall.arguments["display_frame_width"]?.numberValue ?? inferredDisplayFrame.width,
+            height: toolCall.arguments["display_frame_height"]?.numberValue ?? inferredDisplayFrame.height
+        )
+        let label = toolCall.arguments["label"]?.stringValue ?? "target"
+
+        if !isOverlayVisible {
+            overlayWindowManager.hasShownOverlayBefore = true
+            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+            isOverlayVisible = true
+        }
+
+        voiceState = .idle
+        clearDetectedElementLocation()
+        await Task.yield()
+
+        detectedElementBubbleText = label
+        detectedElementDisplayFrame = displayFrame
+        detectedElementScreenLocation = clickLocation
+        JarvisDebugLogger.logVerbose(
+            "Visual",
+            "cursor fly-to: tool=\(toolCall.toolName) label=\"\(label)\" location=(\(Int(clickLocation.x)), \(Int(clickLocation.y)))"
+        )
+
+        try? await Task.sleep(nanoseconds: 1_100_000_000)
     }
 
     // MARK: - Companion Prompt
 
     private static let companionVoiceResponseSystemPrompt = """
-    you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see their screen(s). your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
+    you're clicky, a friendly always-on companion that lives in the user's menu bar. the user just spoke to you via push-to-talk and you can see the screen where their cursor is. your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     rules:
-    - default to one or two sentences. be direct and dense. BUT if the user asks you to explain more, go deeper, or elaborate, then go all out — give a thorough, detailed explanation with no length limit.
+    - default to one short sentence. use two sentences only when needed. if the user asks "what do you see" or "tell me what you see", give a compact summary of the current screen, not a full inventory.
+    - if the user asks you to explain more, go deeper, or elaborate, then give a fuller explanation.
     - all lowercase, casual, warm. no emojis.
     - write for the ear, not the eye. short sentences. no lists, bullet points, markdown, or formatting — just natural speech.
     - don't use abbreviations or symbols that sound weird read aloud. write "for example" not "e.g.", spell out small numbers.
@@ -617,9 +678,14 @@ final class CompanionManager: ObservableObject {
     - you can help with anything — coding, writing, general knowledge, brainstorming.
     - never say "simply" or "just".
     - don't read out code verbatim. describe what the code does or what needs to change conversationally.
-    - focus on giving a thorough, useful explanation. don't end with simple yes/no questions like "want me to explain more?" or "should i show you?" — those are dead ends that force the user to just say yes.
-    - instead, when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained. make it something worth coming back for, not a question they'd just nod to. it's okay to not end with anything extra if the answer is complete on its own.
-    - if you receive multiple screen images, the one labeled "primary focus" is where the cursor is — prioritize that one but reference others if relevant.
+    - don't end with simple yes/no questions like "want me to explain more?" or "should i show you?" it's okay to stop once the answer is complete.
+    - only describe the provided current screen. don't mention other monitors or assume you can see them.
+
+    live information:
+    if the user's question needs current or live information that is not visible on the screen — weather, prices, exchange rates, stock quotes, sports scores, news, anything time-sensitive — do not guess from memory and do not tell the user to search for it themselves. instead, respond with exactly [SEARCH:short search query] and nothing else — no other words, no point tag. the search will run for you and you will be asked again with the results on screen. only use [SEARCH:...] when the answer truly is not on the current screen; if it is visible, answer from the screen.
+
+    example:
+    - user asks "what's the weather in toronto right now" while the screen shows a code editor: "[SEARCH:toronto weather right now]"
 
     element pointing:
     you have a small blue triangle cursor that can fly to and point at things on screen. use it whenever pointing would genuinely help the user — if they're asking how to do something, looking for a menu, trying to find a button, or need help navigating an app, point at the relevant element. err on the side of pointing rather than not pointing, because it makes your help way more useful and concrete.
@@ -628,7 +694,7 @@ final class CompanionManager: ObservableObject {
 
     when you point, append a coordinate tag at the very end of your response, AFTER your spoken text. the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward.
 
-    format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screenshot's coordinate space, and label is a short 1-3 word description of the element (like "search bar" or "save button"). if the element is on the cursor's screen you can omit the screen number. if the element is on a DIFFERENT screen, append :screenN where N is the screen number from the image label (e.g. :screen2). this is important — without the screen number, the cursor will point at the wrong place.
+    format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screenshot's coordinate space, and label is a short 1-3 word description of the element (like "search bar" or "save button").
 
     if pointing wouldn't help, append [POINT:none].
 
@@ -636,60 +702,97 @@ final class CompanionManager: ObservableObject {
     - user asks how to color grade in final cut: "you'll want to open the color inspector — it's right up in the top right area of the toolbar. click that and you'll get all the color wheels and curves. [POINT:1100,42:color inspector]"
     - user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. curious how it connects to the css you're looking at? [POINT:none]"
     - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
-    - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
     """
 
     // MARK: - AI Response Pipeline
 
-    /// Captures a screenshot, sends it along with the transcript to Claude,
-    /// and plays the response aloud via ElevenLabs TTS. The cursor stays in
-    /// the spinner/processing state until TTS audio begins playing.
-    /// Claude's response may include a [POINT:x,y:label] tag which triggers
-    /// the buddy to fly to that element on screen.
-    private func sendTranscriptToClaudeWithScreenshot(transcript: String) {
+    /// Captures the display containing the cursor, sends it with the
+    /// transcript to the local Ollama vision model, and speaks the response with
+    /// macOS system TTS.
+    /// The response may include a [POINT:x,y:label] tag which triggers the buddy
+    /// to fly to that element on screen, or a [SEARCH:query] tag which escalates
+    /// to a browser search before answering from the results page.
+    ///
+    /// - Parameter allowSearchEscalation: When true (the default), a [SEARCH:query]
+    ///   response triggers a browser search and one follow-up vision call on the
+    ///   results page. The follow-up call passes false so escalation cannot loop.
+    private func sendTranscriptToLocalVisionWithScreenshot(
+        transcript: String,
+        allowSearchEscalation: Bool = true
+    ) {
         currentResponseTask?.cancel()
-        elevenLabsTTSClient.stopPlayback()
+        localSpeechSynthesizer?.stopSpeaking()
 
         currentResponseTask = Task {
-            // Stay in processing (spinner) state — no streaming text displayed
+            // Stay in processing (spinner) state
             voiceState = .processing
 
             do {
-                // Capture all connected screens so the AI has full context
-                let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                // Capture only the screen the user is actively working on.
+                let screenCaptures = try await CompanionScreenCaptureUtility.captureCursorScreenAsJPEG()
 
                 guard !Task.isCancelled else { return }
 
                 // Build image labels with the actual screenshot pixel dimensions
-                // so Claude's coordinate space matches the image it sees. We
-                // scale from screenshot pixels to display points ourselves.
+                // so the model's coordinate space matches the image it sees.
                 let labeledImages = screenCaptures.map { capture in
                     let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
                     return (data: capture.imageData, label: capture.label + dimensionInfo)
                 }
 
-                // Pass conversation history so Claude remembers prior exchanges
+                // Pass conversation history so the model remembers prior exchanges
                 let historyForAPI = conversationHistory.map { entry in
                     (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                 }
 
-                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
-                    images: labeledImages,
-                    systemPrompt: Self.companionVoiceResponseSystemPrompt,
-                    conversationHistory: historyForAPI,
+                // Use the local Ollama vision model (qwen3-vl by default) directly.
+                // Non-streaming is fine — TTS handles all spoken output.
+                let fullResponseText = try await localLLMVisionClient.generateVisionChat(
                     userPrompt: transcript,
-                    onTextChunk: { _ in
-                        // No streaming text display — spinner stays until TTS plays
-                    }
+                    systemPrompt: Self.companionVoiceResponseSystemPrompt,
+                    imageDataArray: labeledImages.map { $0.data },
+                    imageLabels: labeledImages.map { $0.label },
+                    conversationHistory: historyForAPI.map { (userText: $0.userPlaceholder, assistantText: $0.assistantResponse) }
                 )
 
                 guard !Task.isCancelled else { return }
 
-                // Parse the [POINT:...] tag from Claude's response
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
+                // Vision → action escalation: the model determined the answer
+                // needs live information that is not on the current screen.
+                // Run a browser search (deterministic fast path: open Chrome,
+                // focus address bar, type, return), give the results page a
+                // moment to render, then re-ask the same question with the
+                // fresh screen. The follow-up call disables escalation so this
+                // cannot loop.
+                let searchEscalation = Self.parseSearchEscalation(from: fullResponseText)
+                if allowSearchEscalation, let searchQuery = searchEscalation.searchQuery {
+                    JarvisDebugLogger.log("Voice", "vision escalated to search: \"\(searchQuery)\"")
+                    await speakJarvisStatus("let me look that up.")
+                    _ = await jarvisAssistantManager.runTextCommand("search for \(searchQuery)")
+                    guard !Task.isCancelled else { return }
+
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    guard !Task.isCancelled else { return }
+
+                    sendTranscriptToLocalVisionWithScreenshot(
+                        transcript: transcript,
+                        allowSearchEscalation: false
+                    )
+                    return
+                }
+
+                // Any leftover [SEARCH:...] tag (e.g. on the no-escalation
+                // follow-up) must never be spoken aloud.
+                let responseTextWithoutSearchTag = searchEscalation.textWithoutTag
+
+                // Parse the [POINT:...] tag from the local vision response
+                let responseTextWithPointTag = responseTextWithoutSearchTag.contains("[POINT:")
+                    ? responseTextWithoutSearchTag
+                    : "\(responseTextWithoutSearchTag) [POINT:none]"
+                let parseResult = Self.parsePointingCoordinates(from: responseTextWithPointTag)
                 let spokenText = parseResult.spokenText
 
-                // Handle element pointing if Claude returned coordinates.
+                // Handle element pointing if the model returned coordinates.
                 // Switch to idle BEFORE setting the location so the triangle
                 // becomes visible and can fly to the target. Without this, the
                 // spinner hides the triangle and the flight animation is invisible.
@@ -698,7 +801,7 @@ final class CompanionManager: ObservableObject {
                     voiceState = .idle
                 }
 
-                // Pick the screen capture matching Claude's screen number,
+                // Pick the screen capture matching the model's screen number,
                 // falling back to the cursor screen if not specified.
                 let targetScreenCapture: CompanionScreenCapture? = {
                     if let screenNumber = parseResult.screenNumber,
@@ -710,7 +813,7 @@ final class CompanionManager: ObservableObject {
 
                 if let pointCoordinate = parseResult.coordinate,
                    let targetScreenCapture {
-                    // Claude's coordinates are in the screenshot's pixel space
+                    // Model coordinates are in the screenshot's pixel space
                     // (top-left origin, e.g. 1280x831). Scale to the display's
                     // point space (e.g. 1512x982), then convert to AppKit global coords.
                     let screenshotWidth = CGFloat(targetScreenCapture.screenshotWidthInPixels)
@@ -760,25 +863,15 @@ final class CompanionManager: ObservableObject {
 
                 ClickyAnalytics.trackAIResponseReceived(response: spokenText)
 
-                // Play the response via TTS. Keep the spinner (processing state)
-                // until the audio actually starts playing, then switch to responding.
                 if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    do {
-                        try await elevenLabsTTSClient.speakText(spokenText)
-                        // speakText returns after player.play() — audio is now playing
-                        voiceState = .responding
-                    } catch {
-                        ClickyAnalytics.trackTTSError(error: error.localizedDescription)
-                        print("⚠️ ElevenLabs TTS error: \(error)")
-                        speakCreditsErrorFallback()
-                    }
+                    await speakJarvisStatus(spokenText)
                 }
             } catch is CancellationError {
                 // User spoke again — response was interrupted
             } catch {
                 ClickyAnalytics.trackResponseError(error: error.localizedDescription)
                 print("⚠️ Companion response error: \(error)")
-                speakCreditsErrorFallback()
+                speakLocalErrorFallback()
             }
 
             if !Task.isCancelled {
@@ -789,7 +882,7 @@ final class CompanionManager: ObservableObject {
     }
 
     /// If the cursor is in transient mode (user toggled "Show Clicky" off),
-    /// waits for TTS playback and any pointing animation to finish, then
+    /// waits for any pointing animation to finish, then
     /// fades out the overlay after a 1-second pause. Cancelled automatically
     /// if the user starts another push-to-talk interaction.
     private func scheduleTransientHideIfNeeded() {
@@ -797,12 +890,6 @@ final class CompanionManager: ObservableObject {
 
         transientHideTask?.cancel()
         transientHideTask = Task {
-            // Wait for TTS audio to finish playing
-            while elevenLabsTTSClient.isPlaying {
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                guard !Task.isCancelled else { return }
-            }
-
             // Wait for pointing animation to finish (location is cleared
             // when the buddy flies back to the cursor)
             while detectedElementScreenLocation != nil {
@@ -818,23 +905,49 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// Speaks a hardcoded error message using macOS system TTS when API
-    /// credits run out. Uses NSSpeechSynthesizer so it works even when
-    /// ElevenLabs is down.
-    private func speakCreditsErrorFallback() {
-        let utterance = "I'm all out of credits. Please DM Farza and tell him to bring me back to life."
+    private func speakLocalErrorFallback() {
+        let utterance = "I couldn't get a local vision response from Ollama."
+        print("🗣️ Jarvis said: \(utterance)")
+        localSpeechSynthesizer?.stopSpeaking()
         let synthesizer = NSSpeechSynthesizer()
+        localSpeechSynthesizer = synthesizer
         synthesizer.startSpeaking(utterance)
         voiceState = .responding
     }
 
+    // MARK: - Search Escalation Tag Parsing
+
+    /// Extracts a [SEARCH:query] tag from the local vision response. Returns
+    /// the search query (or nil when no tag is present) plus the response text
+    /// with the tag removed so it can never leak into spoken output.
+    static func parseSearchEscalation(from responseText: String) -> (searchQuery: String?, textWithoutTag: String) {
+        guard let tagRange = responseText.range(of: #"\[SEARCH:[^\]]+\]"#, options: .regularExpression) else {
+            return (searchQuery: nil, textWithoutTag: responseText)
+        }
+
+        let tagText = String(responseText[tagRange])
+        let searchQuery = tagText
+            .dropFirst("[SEARCH:".count)
+            .dropLast(1)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var textWithoutTag = responseText
+        textWithoutTag.removeSubrange(tagRange)
+        textWithoutTag = textWithoutTag.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return (
+            searchQuery: searchQuery.isEmpty ? nil : searchQuery,
+            textWithoutTag: textWithoutTag
+        )
+    }
+
     // MARK: - Point Tag Parsing
 
-    /// Result of parsing a [POINT:...] tag from Claude's response.
+    /// Result of parsing a [POINT:...] tag from the local vision response.
     struct PointingParseResult {
         /// The response text with the [POINT:...] tag removed — this is what gets spoken.
         let spokenText: String
-        /// The parsed pixel coordinate, or nil if Claude said "none" or no tag was found.
+        /// The parsed pixel coordinate, or nil if the model said "none" or no tag was found.
         let coordinate: CGPoint?
         /// Short label describing the element (e.g. "run button"), or "none".
         let elementLabel: String?
@@ -842,7 +955,7 @@ final class CompanionManager: ObservableObject {
         let screenNumber: Int?
     }
 
-    /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of Claude's response.
+    /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of the local vision response.
     /// Returns the spoken text (tag removed) and the optional coordinate + label + screen number.
     static func parsePointingCoordinates(from responseText: String) -> PointingParseResult {
         // Match [POINT:none] or [POINT:123,456:label] or [POINT:123,456:label:screen2]
@@ -1010,80 +1123,20 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Onboarding Demo Interaction
 
-    private static let onboardingDemoSystemPrompt = """
-    you're clicky, a small blue cursor buddy living on the user's screen. you're showing off during onboarding — look at their screen and find ONE specific, concrete thing to point at. pick something with a clear name or identity: a specific app icon (say its name), a specific word or phrase of text you can read, a specific filename, a specific button label, a specific tab title, a specific image you can describe. do NOT point at vague things like "a window" or "some text" — be specific about exactly what you see.
-
-    make a short quirky 3-6 word observation about the specific thing you picked — something fun, playful, or curious that shows you actually read/recognized it. no emojis ever. NEVER quote or repeat text you see on screen — just react to it. keep it to 6 words max, no exceptions.
-
-    CRITICAL COORDINATE RULE: you MUST only pick elements near the CENTER of the screen. your x coordinate must be between 20%-80% of the image width. your y coordinate must be between 20%-80% of the image height. do NOT pick anything in the top 20%, bottom 20%, left 20%, or right 20% of the screen. no menu bar items, no dock icons, no sidebar items, no items near any edge. only things clearly in the middle area of the screen. if the only interesting things are near the edges, pick something boring in the center instead.
-
-    respond with ONLY your short comment followed by the coordinate tag. nothing else. all lowercase.
-
-    format: your comment [POINT:x,y:label]
-
-    the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. origin (0,0) is top-left. x increases rightward, y increases downward.
-    """
-
-    /// Captures a screenshot and asks Claude to find something interesting to
-    /// point at, then triggers the buddy's flight animation. Used during
-    /// onboarding to demo the pointing feature while the intro video plays.
+    /// Triggers a local-only pointing demo during onboarding. This avoids any
+    /// cloud LLM dependency while still showing that the overlay can navigate.
     func performOnboardingDemoInteraction() {
         // Don't interrupt an active voice response
         guard voiceState == .idle || voiceState == .responding else { return }
 
-        Task {
-            do {
-                let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
-
-                // Only send the cursor screen so Claude can't pick something
-                // on a different monitor that we can't point at.
-                guard let cursorScreenCapture = screenCaptures.first(where: { $0.isCursorScreen }) else {
-                    print("🎯 Onboarding demo: no cursor screen found")
-                    return
-                }
-
-                let dimensionInfo = " (image dimensions: \(cursorScreenCapture.screenshotWidthInPixels)x\(cursorScreenCapture.screenshotHeightInPixels) pixels)"
-                let labeledImages = [(data: cursorScreenCapture.imageData, label: cursorScreenCapture.label + dimensionInfo)]
-
-                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
-                    images: labeledImages,
-                    systemPrompt: Self.onboardingDemoSystemPrompt,
-                    userPrompt: "look around my screen and find something interesting to point at",
-                    onTextChunk: { _ in }
-                )
-
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
-
-                guard let pointCoordinate = parseResult.coordinate else {
-                    print("🎯 Onboarding demo: no element to point at")
-                    return
-                }
-
-                let screenshotWidth = CGFloat(cursorScreenCapture.screenshotWidthInPixels)
-                let screenshotHeight = CGFloat(cursorScreenCapture.screenshotHeightInPixels)
-                let displayWidth = CGFloat(cursorScreenCapture.displayWidthInPoints)
-                let displayHeight = CGFloat(cursorScreenCapture.displayHeightInPoints)
-                let displayFrame = cursorScreenCapture.displayFrame
-
-                let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
-                let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
-                let displayLocalX = clampedX * (displayWidth / screenshotWidth)
-                let displayLocalY = clampedY * (displayHeight / screenshotHeight)
-                let appKitY = displayHeight - displayLocalY
-                let globalLocation = CGPoint(
-                    x: displayLocalX + displayFrame.origin.x,
-                    y: appKitY + displayFrame.origin.y
-                )
-
-                // Set custom bubble text so the pointing animation uses Claude's
-                // comment instead of a random phrase
-                detectedElementBubbleText = parseResult.spokenText
-                detectedElementScreenLocation = globalLocation
-                detectedElementDisplayFrame = displayFrame
-                print("🎯 Onboarding demo: pointing at \"\(parseResult.elementLabel ?? "element")\" — \"\(parseResult.spokenText)\"")
-            } catch {
-                print("⚠️ Onboarding demo error: \(error)")
-            }
+        guard let cursorScreen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main else {
+            return
         }
+
+        let displayFrame = cursorScreen.frame
+        detectedElementBubbleText = "local mode"
+        detectedElementScreenLocation = CGPoint(x: displayFrame.midX, y: displayFrame.midY)
+        detectedElementDisplayFrame = displayFrame
+        print("🎯 Onboarding demo: local-only center-screen pointer")
     }
 }

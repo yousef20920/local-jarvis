@@ -19,18 +19,19 @@ LICENSE                  # Upstream MIT license notice
 
 ## Current Phase
 
-Phase 3 is complete. Jarvis now has both a text command loop in the macOS panel and a push-to-talk voice path using the same planner and tools.
+Jarvis now runs a fully local computer-use agent loop. Apple Speech transcribes voice, a single Qwen3-VL multimodal model (via Ollama) routes intent, looks at a fresh screenshot before every action, picks the next mouse/keyboard step, and adapts when something fails. macOS system speech speaks the result.
 
-Current text commands include:
+Simple screen-independent commands (`open Chrome`, `press command space`, `type hello world`, `take screenshot`, `search for local LLMs for Mac`) still execute instantly through deterministic rules. Everything else — clicks, multi-step tasks, screen questions — goes through the observe-act agent loop, which can click, double-click, right-click, drag, scroll, move the mouse, type, press hotkeys, open apps, and wait, up to 15 steps per command.
 
-1. `open Chrome`
-2. `open Safari`
-3. `type hello world`
-4. `press command space`
-5. `search for local LLMs for Mac`
-6. `take screenshot`
+Local runtime setup (native Ollama — Docker has no GPU access on macOS, so the model server must run natively for usable speed):
 
-The next phase is screen-aware actions, where Jarvis uses screenshot context before clicking or typing into specific UI elements.
+```bash
+brew install --cask ollama-app
+open -a Ollama
+ollama pull qwen3-vl:8b-instruct
+```
+
+Use the `-instruct` tag — the bare `qwen3-vl:8b` tag is the thinking variant, which spends minutes on thinking tokens and returns empty content under JSON-enforced output. `qwen3-vl:4b-instruct` is available as a faster, smaller option in the in-app model picker. If your installed tag differs, update the picker or set the `jarvisLocalLLMModel` and `jarvisLocalVisionModel` app defaults.
 
 ## Attribution
 

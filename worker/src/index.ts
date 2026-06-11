@@ -7,6 +7,7 @@
  * Routes:
  *   POST /chat  → Anthropic Messages API (streaming)
  *   POST /tts   → ElevenLabs TTS API
+ *   POST /detect-element → Anthropic Computer Use element detection
  */
 
 interface Env {
@@ -36,6 +37,10 @@ export default {
       if (url.pathname === "/transcribe-token") {
         return await handleTranscribeToken(env);
       }
+
+      if (url.pathname === "/detect-element") {
+        return await handleDetectElement(request, env);
+      }
     } catch (error) {
       console.error(`[${url.pathname}] Unhandled error:`, error);
       return new Response(
@@ -47,6 +52,38 @@ export default {
     return new Response("Not found", { status: 404 });
   },
 };
+
+async function handleDetectElement(request: Request, env: Env): Promise<Response> {
+  const body = await request.text();
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "computer-use-2025-11-24",
+      "content-type": "application/json",
+    },
+    body,
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    console.error(`[/detect-element] Anthropic API error ${response.status}: ${errorBody}`);
+    return new Response(errorBody, {
+      status: response.status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  return new Response(response.body, {
+    status: response.status,
+    headers: {
+      "content-type": response.headers.get("content-type") || "application/json",
+      "cache-control": "no-cache",
+    },
+  });
+}
 
 async function handleChat(request: Request, env: Env): Promise<Response> {
   const body = await request.text();

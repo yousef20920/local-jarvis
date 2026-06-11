@@ -305,13 +305,15 @@ stop
 
 Goal: let Jarvis use the screen before clicking or typing.
 
+Status: complete. Jarvis now detects visible UI elements for click/tap commands by capturing the cursor display, sending the screenshot to the local Ollama-compatible model, mapping the returned coordinate into macOS screen space, pointing the overlay at the target, and executing a `click_at` tool.
+
 Tasks:
 
-1. Capture screenshots before planning.
-2. Include active display/window context.
-3. Let the planner ask for `find_screen_element` before clicking.
-4. Use the existing cursor overlay to point before acting when useful.
-5. Ask the user to clarify if the target is uncertain.
+1. Capture screenshots before planning. Done.
+2. Include active display/window context. Done.
+3. Let the planner ask for `find_screen_element` before clicking. Done through the screen context provider.
+4. Use the existing cursor overlay to point before acting when useful. Done.
+5. Ask the user to clarify if the target is uncertain. Done as a failed/unsupported plan response when no element is found.
 
 Success criteria:
 
@@ -324,13 +326,15 @@ Jarvis finds the likely search bar and clicks it.
 
 Goal: support simple sequences of tool calls.
 
+Status: complete. Jarvis now creates an explicit workflow for every multi-step plan, executes one step at a time, publishes per-step status, stops on failures or confirmation requirements, supports cancellation through `stop`, and calls a planner continuation hook after each successful tool result so future planners can append follow-up actions.
+
 Tasks:
 
-1. Add a workflow executor.
-2. Run one tool call at a time.
-3. Feed each result back into the planner.
-4. Stop on errors or confirmation requirements.
-5. Show progress in the overlay.
+1. Add a workflow executor. Done.
+2. Run one tool call at a time. Done.
+3. Feed each result back into the planner. Done through `continuationToolCalls`.
+4. Stop on errors or confirmation requirements. Done.
+5. Show progress in the overlay. Progress is shown in the Jarvis panel for now; overlay progress remains a future UI enhancement.
 
 Success criteria:
 
@@ -343,19 +347,28 @@ Jarvis opens Chrome, types the search, presses Enter, and reports completion.
 
 Goal: make cloud dependencies replaceable with local modules, use one of the gemma 4 models, we want to test those models that can run on raspberry pi.
 
+Status: complete in code. The active Jarvis path now uses Apple Speech for STT, an Ollama-compatible local Gemma 4 model for planning and screen element detection, macOS system speech for TTS, and local macOS automation tools. The legacy Claude/Worker clients still exist in the repo for old companion code, but they are no longer used by the default Jarvis command loop.
+
 Tasks:
 
-1. Keep Claude as the first planner because the current app already supports it.
-2. Add a planner protocol so Claude can be swapped out later.
-3. Add a local LLM backend after the tool loop works.
-4. Keep AssemblyAI/OpenAI/Apple Speech behind the existing transcription provider abstraction.
-5. Add local Whisper later if needed.
-6. Keep ElevenLabs behind the TTS client and add local TTS later if needed.
+1. Keep Claude as the first planner because the current app already supports it. Replaced by local Gemma-first planning.
+2. Add a planner protocol so Claude can be swapped out later. Done.
+3. Add a local LLM backend after the tool loop works. Done through `JarvisLocalLLMClient`.
+4. Keep AssemblyAI/OpenAI/Apple Speech behind the existing transcription provider abstraction. Done; default is now Apple Speech.
+5. Add local Whisper later if needed. Deferred; Apple Speech covers the local MVP.
+6. Keep ElevenLabs behind the TTS client and add local TTS later if needed. Jarvis responses now use macOS system speech.
 
 Success criteria:
 
-1. Jarvis can run with current cloud services.
-2. Planner, STT, and TTS are modular enough to replace independently.
+1. Jarvis can run with current cloud services. Replaced by local-first active path.
+2. Planner, STT, and TTS are modular enough to replace independently. Done.
+
+Local runtime setup:
+
+```text
+ollama serve
+ollama pull gemma4:e4b
+```
 
 ---
 

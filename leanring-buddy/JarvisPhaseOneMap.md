@@ -24,6 +24,6 @@ Phase 1 adds Jarvis software boundaries without changing the current app's runti
 
 ## Runtime Status
 
-Jarvis is scaffolded, the Phase 2 text command loop is wired into `CompanionPanelView`, and Phase 3 routes finalized push-to-talk transcripts through the same Jarvis manager. The older Claude screenshot response pipeline still exists in `CompanionManager` but is no longer the default push-to-talk route.
+Jarvis is scaffolded, the Phase 2 text command loop is wired into `CompanionPanelView`, Phase 3 routes finalized push-to-talk transcripts through the same Jarvis manager, Phase 4 adds screen-aware click/tap commands through `ElementLocationDetector` and `click_at`, Phase 5 adds explicit multi-step workflow state and result-aware continuation hooks, and Phase 6 swaps the active assistant path to local Gemma via Ollama plus Apple/macOS speech. The older Claude screenshot response pipeline still exists in `CompanionManager` but is no longer the default Jarvis route.
 
-The next phase should add screen-aware action planning before clicks and other UI-targeted actions.
+The next phase should make planner, speech-to-text, and text-to-speech replacement points clearer for local-first AI backends.

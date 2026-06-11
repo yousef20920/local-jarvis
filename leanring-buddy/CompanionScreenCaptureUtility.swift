@@ -24,10 +24,20 @@ struct CompanionScreenCapture {
 @MainActor
 enum CompanionScreenCaptureUtility {
 
-    /// Captures all connected displays as JPEG data, labeling each with
-    /// whether the user's cursor is on that screen. This gives the AI
-    /// full context across multiple monitors.
     static func captureAllScreensAsJPEG() async throws -> [CompanionScreenCapture] {
+        try await captureScreensAsJPEG(cursorScreenOnly: false)
+    }
+
+    /// Captures only the display containing the user's cursor. This is the
+    /// default for companion vision so "what do you see" stays scoped to the
+    /// screen the user is actively working on.
+    static func captureCursorScreenAsJPEG() async throws -> [CompanionScreenCapture] {
+        try await captureScreensAsJPEG(cursorScreenOnly: true)
+    }
+
+    /// Captures connected displays as JPEG data, labeling each with whether
+    /// the user's cursor is on that screen.
+    private static func captureScreensAsJPEG(cursorScreenOnly: Bool) async throws -> [CompanionScreenCapture] {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
 
         guard !content.displays.isEmpty else {
@@ -67,9 +77,16 @@ enum CompanionScreenCaptureUtility {
             return false
         }
 
+        let displaysToCapture: [SCDisplay]
+        if cursorScreenOnly {
+            displaysToCapture = Array(sortedDisplays.prefix(1))
+        } else {
+            displaysToCapture = sortedDisplays
+        }
+
         var capturedScreens: [CompanionScreenCapture] = []
 
-        for (displayIndex, display) in sortedDisplays.enumerated() {
+        for (displayIndex, display) in displaysToCapture.enumerated() {
             // Use NSScreen.frame (AppKit coordinates, bottom-left origin) so
             // displayFrame is in the same coordinate system as NSEvent.mouseLocation
             // and the overlay window's screenFrame in BlueCursorView.
@@ -102,7 +119,9 @@ enum CompanionScreenCaptureUtility {
             }
 
             let screenLabel: String
-            if sortedDisplays.count == 1 {
+            if cursorScreenOnly {
+                screenLabel = "current screen only — cursor is on this screen"
+            } else if sortedDisplays.count == 1 {
                 screenLabel = "user's screen (cursor is here)"
             } else if isCursorScreen {
                 screenLabel = "screen \(displayIndex + 1) of \(sortedDisplays.count) — cursor is on this screen (primary focus)"

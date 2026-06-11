@@ -16,6 +16,8 @@ enum JarvisPhaseTwoToolInstaller {
         toolRegistry.register(JarvisTypeTextTool())
         toolRegistry.register(JarvisPressHotkeyTool())
         toolRegistry.register(JarvisTakeScreenshotTool())
+        toolRegistry.register(JarvisClickAtTool())
+        JarvisComputerUseToolInstaller.registerTools(in: toolRegistry)
     }
 }
 
@@ -44,18 +46,18 @@ struct JarvisOpenAppTool: JarvisTool {
         do {
             if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier(for: appName)) {
                 _ = try await NSWorkspace.shared.openApplication(at: appURL, configuration: configuration)
-                try? await Task.sleep(nanoseconds: 700_000_000)
+                try? await Task.sleep(nanoseconds: 400_000_000)
                 return .success("Opened \(appName).")
             }
 
             if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: appName) {
                 _ = try await NSWorkspace.shared.openApplication(at: appURL, configuration: configuration)
-                try? await Task.sleep(nanoseconds: 700_000_000)
+                try? await Task.sleep(nanoseconds: 400_000_000)
                 return .success("Opened \(appName).")
             }
 
             _ = try await NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: "/Applications/\(appName).app"), configuration: configuration)
-            try? await Task.sleep(nanoseconds: 700_000_000)
+            try? await Task.sleep(nanoseconds: 400_000_000)
             return .success("Opened \(appName).")
         } catch {
             return .failure("Could not open \(appName): \(error.localizedDescription)")
@@ -176,6 +178,78 @@ struct JarvisTakeScreenshotTool: JarvisTool {
         } catch {
             return .failure("Could not take a screenshot: \(error.localizedDescription)")
         }
+    }
+}
+
+@MainActor
+struct JarvisClickAtTool: JarvisTool {
+    let definition = JarvisToolDefinition(
+        name: "click_at",
+        summary: "Move the pointer and click a global macOS screen coordinate.",
+        requiredArgumentNames: ["x", "y"],
+        optionalArgumentNames: ["label", "display_frame_x", "display_frame_y", "display_frame_width", "display_frame_height"],
+        defaultRequiresConfirmation: false
+    )
+
+    func execute(
+        arguments: [String: JarvisToolArgumentValue],
+        context: JarvisToolExecutionContext
+    ) async -> JarvisToolResult {
+        guard AXIsProcessTrusted() else {
+            return .failure("Accessibility permission is required before Jarvis can click.")
+        }
+
+        guard let x = arguments["x"]?.numberValue,
+              let y = arguments["y"]?.numberValue else {
+            return .failure("Jarvis needs screen coordinates before it can click.")
+        }
+
+        let label = arguments["label"]?.stringValue ?? "the target"
+        let appKitGlobalPoint = CGPoint(x: x, y: y)
+        let clickPoint = quartzPoint(fromAppKitPoint: appKitGlobalPoint, arguments: arguments)
+
+        JarvisDebugLogger.logClick(
+            clickType: "LEFT_CLICK",
+            label: label,
+            appKitGlobalX: appKitGlobalPoint.x,
+            appKitGlobalY: appKitGlobalPoint.y,
+            quartzGlobalX: clickPoint.x,
+            quartzGlobalY: clickPoint.y
+        )
+        CGWarpMouseCursorPosition(clickPoint)
+        JarvisDebugLogger.logCursorPositionAfterWarp(
+            expectedAppKitX: appKitGlobalPoint.x,
+            expectedAppKitY: appKitGlobalPoint.y
+        )
+
+        guard let mouseDownEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: clickPoint, mouseButton: .left),
+              let mouseUpEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: clickPoint, mouseButton: .left) else {
+            return .failure("Jarvis could not create the click event.")
+        }
+
+        JarvisDebugLogger.logVerbose("Click", "posting leftMouseDown + leftMouseUp at Quartz=(\(Int(clickPoint.x)), \(Int(clickPoint.y)))")
+        mouseDownEvent.post(tap: .cghidEventTap)
+        mouseUpEvent.post(tap: .cghidEventTap)
+        return .success("Clicked \(label).")
+    }
+
+    /// Converts an AppKit global point (origin at the bottom-left of the
+    /// primary screen) to a Quartz global point (origin at the top-left of the
+    /// primary screen). Only the primary screen's height matters — both
+    /// coordinate systems share the same origin screen, so the conversion is
+    /// a single flip regardless of which display the point is on.
+    private func quartzPoint(
+        fromAppKitPoint appKitPoint: CGPoint,
+        arguments: [String: JarvisToolArgumentValue]
+    ) -> CGPoint {
+        guard let primaryScreenHeight = NSScreen.screens.first?.frame.height else {
+            return appKitPoint
+        }
+
+        return CGPoint(
+            x: appKitPoint.x,
+            y: primaryScreenHeight - appKitPoint.y
+        )
     }
 }
 
