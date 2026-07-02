@@ -113,6 +113,14 @@ final class CompanionManager: ObservableObject {
         UserDefaults.standard.set(model, forKey: "jarvisLocalLLMModel")
     }
 
+    @Published var selectedLocalRouterModel: String = JarvisLocalLLMConfiguration.storedRouterModelName()
+        ?? JarvisLocalLLMConfiguration.defaultRouterModelName
+
+    func setSelectedLocalRouterModel(_ model: String) {
+        selectedLocalRouterModel = model
+        UserDefaults.standard.set(model, forKey: "jarvisLocalRouterModel")
+    }
+
     @Published var selectedLocalVisionModel: String = JarvisLocalLLMConfiguration.storedModelName(forKey: "jarvisLocalVisionModel")
         ?? JarvisLocalLLMConfiguration.defaultModelName
 
@@ -184,6 +192,9 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
+        Task {
+            await voiceIntentRouter.warmUp()
+        }
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
         // were revoked (e.g. signing change), don't show the cursor — the
@@ -869,6 +880,10 @@ final class CompanionManager: ObservableObject {
             } catch is CancellationError {
                 // User spoke again — response was interrupted
             } catch {
+                if Self.isCancellationError(error) {
+                    JarvisDebugLogger.logVerbose("Voice", "vision response cancelled")
+                    return
+                }
                 ClickyAnalytics.trackResponseError(error: error.localizedDescription)
                 print("⚠️ Companion response error: \(error)")
                 speakLocalErrorFallback()
@@ -913,6 +928,12 @@ final class CompanionManager: ObservableObject {
         localSpeechSynthesizer = synthesizer
         synthesizer.startSpeaking(utterance)
         voiceState = .responding
+    }
+
+    private static func isCancellationError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain
+            && nsError.code == NSURLErrorCancelled
     }
 
     // MARK: - Search Escalation Tag Parsing

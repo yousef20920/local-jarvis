@@ -19,7 +19,7 @@ LICENSE                  # Upstream MIT license notice
 
 ## Current Phase
 
-Jarvis now runs a fully local computer-use agent loop. Apple Speech transcribes voice, a single Qwen3-VL multimodal model (via Ollama) routes intent, looks at a fresh screenshot before every action, picks the next mouse/keyboard step, and adapts when something fails. macOS system speech speaks the result.
+Jarvis now runs a fully local computer-use agent loop. Apple Speech transcribes voice, a small local Qwen text model routes intent, and Qwen3-VL looks at a fresh screenshot before visual actions, picks the next mouse/keyboard step, and adapts when something fails. macOS system speech speaks the result.
 
 Simple screen-independent commands (`open Chrome`, `press command space`, `type hello world`, `take screenshot`, `search for local LLMs for Mac`) still execute instantly through deterministic rules. Everything else — clicks, multi-step tasks, screen questions — goes through the observe-act agent loop, which can click, double-click, right-click, drag, scroll, move the mouse, type, press hotkeys, open apps, and wait, up to 15 steps per command.
 
@@ -31,7 +31,7 @@ open -a Ollama
 ollama pull qwen3-vl:8b-instruct
 ```
 
-Use the `-instruct` tag — the bare `qwen3-vl:8b` tag is the thinking variant, which spends minutes on thinking tokens and returns empty content under JSON-enforced output. `qwen3-vl:4b-instruct` is available as a faster, smaller option in the in-app model picker. If your installed tag differs, update the picker or set the `jarvisLocalLLMModel` and `jarvisLocalVisionModel` app defaults.
+Use `qwen3-vl:8b-instruct` for routing, vision, and the agent loop. The smaller Qwen text models are faster, but they were not reliable enough for deciding whether Jarvis should answer, search, click, or type. The bare `qwen3-vl:8b` tag is the thinking variant, which spends minutes on thinking tokens and returns empty content under JSON-enforced output. `qwen3-vl:4b-instruct` is available as a faster, smaller option in the in-app model picker. If your installed tag differs, update the picker or set the `jarvisLocalRouterModel`, `jarvisLocalLLMModel`, and `jarvisLocalVisionModel` app defaults.
 
 ## Attribution
 

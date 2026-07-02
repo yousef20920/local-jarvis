@@ -11,8 +11,12 @@ import Foundation
 
 struct JarvisLocalLLMConfiguration {
     let baseURL: URL
-    /// Text-only model used by the Jarvis planner to generate JSON tool calls.
+    /// Text-only model used by planner-style JSON calls.
     let model: String
+    /// Model used for voice intent routing. Defaults to the same reliable
+    /// instruction-tuned multimodal model as the agent; smaller text models
+    /// are fast, but proved too error-prone for routing real commands.
+    let routerModel: String
     /// Vision-capable model used for the computer-use agent loop and the
     /// screen-aware companion response.
     let visionModel: String
@@ -21,6 +25,7 @@ struct JarvisLocalLLMConfiguration {
     // of thinking tokens per call and, with format=json, leaves the content
     // field empty. The -instruct variant answers directly in seconds.
     static let defaultModelName = "qwen3-vl:8b-instruct"
+    static let defaultRouterModelName = defaultModelName
 
     /// Model tags from earlier phases that are no longer suitable for the
     /// computer-use agent (no GUI grounding, or thinking variants that leave
@@ -30,6 +35,9 @@ struct JarvisLocalLLMConfiguration {
     private static let legacyModelNames: Set<String> = [
         "qwen2.5:7b", "llava:7b", "gemma4:e2b", "gemma4:e4b",
         "qwen3-vl:8b", "qwen3-vl:4b"
+    ]
+    private static let legacyRouterModelNames: Set<String> = [
+        "qwen2.5:0.5b", "qwen2.5:1.5b", "qwen2.5:3b"
     ]
 
     /// Reads a stored model override, discarding (and deleting) legacy tags
@@ -46,9 +54,22 @@ struct JarvisLocalLLMConfiguration {
         return storedModelName
     }
 
+    static func storedRouterModelName() -> String? {
+        guard let storedModelName = UserDefaults.standard.string(forKey: "jarvisLocalRouterModel") else {
+            return nil
+        }
+        if legacyRouterModelNames.contains(storedModelName) {
+            JarvisDebugLogger.log("LLM", "migrating legacy router model \"\(storedModelName)\" → \(defaultRouterModelName)")
+            UserDefaults.standard.removeObject(forKey: "jarvisLocalRouterModel")
+            return nil
+        }
+        return storedModelName
+    }
+
     static var current: JarvisLocalLLMConfiguration {
         let storedBaseURL = UserDefaults.standard.string(forKey: "jarvisLocalLLMBaseURL")
         let storedModel = storedModelName(forKey: "jarvisLocalLLMModel")
+        let storedRouterModel = storedRouterModelName()
         let storedVisionModel = storedModelName(forKey: "jarvisLocalVisionModel")
 
         return JarvisLocalLLMConfiguration(
@@ -56,6 +77,7 @@ struct JarvisLocalLLMConfiguration {
             // on connection refused before falling back to IPv4.
             baseURL: URL(string: storedBaseURL ?? "http://127.0.0.1:11434")!,
             model: storedModel ?? defaultModelName,
+            routerModel: storedRouterModel ?? defaultRouterModelName,
             visionModel: storedVisionModel ?? defaultModelName
         )
     }
@@ -96,7 +118,19 @@ final class JarvisLocalLLMClient {
             prompt: prompt,
             model: JarvisLocalLLMConfiguration.current.model,
             imagesBase64: imagesBase64,
-            format: "json"
+            format: "json",
+            numPredict: 256
+        )
+    }
+
+    func generateRouterJSON(prompt: String) async throws -> String {
+        try await generate(
+            prompt: prompt,
+            model: JarvisLocalLLMConfiguration.current.routerModel,
+            format: "json",
+            timeoutInterval: 12,
+            numPredict: 96,
+            numContext: 1024
         )
     }
 
@@ -127,7 +161,9 @@ final class JarvisLocalLLMClient {
         // First call after launch includes model load time, which can take
         // a minute or more for an 8B vision model. Generous timeout so the
         // first command after startup does not fail spuriously.
-        timeoutInterval: TimeInterval = 120
+        timeoutInterval: TimeInterval = 120,
+        numPredict: Int? = nil,
+        numContext: Int? = nil
     ) async throws -> String {
         let configuration = JarvisLocalLLMConfiguration.current
         let generateURL = configuration.baseURL.appendingPathComponent("api/generate")
@@ -146,8 +182,22 @@ final class JarvisLocalLLMClient {
             "think": false,
             "options": [
                 "temperature": 0.0
-            ]
+            ],
+            "keep_alive": "30m"
         ]
+
+        if numPredict != nil || numContext != nil {
+            var options: [String: Any] = [
+                "temperature": 0.0
+            ]
+            if let numPredict {
+                options["num_predict"] = numPredict
+            }
+            if let numContext {
+                options["num_ctx"] = numContext
+            }
+            body["options"] = options
+        }
 
         if !imagesBase64.isEmpty {
             body["images"] = imagesBase64
@@ -205,9 +255,11 @@ final class JarvisLocalLLMClient {
     func generateComputerUseTurn(
         systemPrompt: String,
         userPrompt: String,
-        screenshotBase64: String? = nil
+        screenshotBase64: String? = nil,
+        modelOverride: String? = nil
     ) async throws -> String {
         let configuration = JarvisLocalLLMConfiguration.current
+        let modelName = modelOverride ?? configuration.visionModel
         let chatURL = configuration.baseURL.appendingPathComponent("api/chat")
         var request = URLRequest(url: chatURL)
         request.httpMethod = "POST"
@@ -220,7 +272,7 @@ final class JarvisLocalLLMClient {
         let hasScreenshot = screenshotBase64 != nil
         JarvisDebugLogger.logVerbose(
             "LLM",
-            "chat model=\(configuration.visionModel) vision=\(hasScreenshot) timeout=\(Int(request.timeoutInterval))s"
+            "chat model=\(modelName) vision=\(hasScreenshot) timeout=\(Int(request.timeoutInterval))s"
         )
         JarvisDebugLogger.logMultiline("LLM", title: "system prompt:", body: systemPrompt, maxCharacterCount: 2000)
         JarvisDebugLogger.logMultiline("LLM", title: "user prompt:", body: userPrompt)
@@ -241,7 +293,7 @@ final class JarvisLocalLLMClient {
         ]
 
         let body: [String: Any] = [
-            "model": configuration.visionModel,
+            "model": modelName,
             "stream": false,
             "format": "json",
             // Disable Qwen3 thinking so the action JSON arrives in "content"

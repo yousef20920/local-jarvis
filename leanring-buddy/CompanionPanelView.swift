@@ -832,7 +832,7 @@ struct CompanionPanelView: View {
                     )
             }
 
-            Text("Fast path: rules    Agent loop + vision: \(companionManager.selectedLocalVisionModel)")
+            Text("Router: \(companionManager.selectedLocalRouterModel)    Fast path: rules    Agent loop + vision: \(companionManager.selectedLocalVisionModel)")
                 .font(.system(size: 9, design: .monospaced))
                 .foregroundColor(DS.Colors.textTertiary)
                 .lineLimit(2)
@@ -844,9 +844,10 @@ struct CompanionPanelView: View {
     private func modelOptionButton(label: String, modelID: String) -> some View {
         let isSelected = companionManager.selectedLocalLLMModel == modelID
         return Button(action: {
-            // One multimodal model drives routing, the agent loop, and vision,
-            // so selecting a model updates both the text and vision settings.
+            // Use one reliable multimodal model for routing, the agent loop,
+            // and screen-aware answers.
             companionManager.setSelectedLocalLLMModel(modelID)
+            companionManager.setSelectedLocalRouterModel(modelID)
             companionManager.setSelectedLocalVisionModel(modelID)
         }) {
             Text(label)

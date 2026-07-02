@@ -30,13 +30,14 @@ http://localhost:11434
 ollama pull qwen3-vl:8b-instruct
 ```
 
-The app defaults to one multimodal model for everything — voice intent routing, the computer-use agent loop, and screen-aware answers:
+The app defaults to the reliable Qwen3-VL model for routing, the agent loop, and screen-aware answers:
 
 ```text
+Voice intent router: qwen3-vl:8b-instruct
 Agent + vision: qwen3-vl:8b-instruct
 ```
 
-**Use the `-instruct` tags, not the bare ones.** The bare `qwen3-vl:8b` tag is the *thinking* variant: it burns minutes of thinking tokens per call and returns empty content when JSON output is enforced. The instruct variant answers directly in seconds.
+The router is warmed up when the app starts and kept alive through Ollama. Smaller Qwen text models are faster, but they were not reliable enough for real voice routing. **Use the `-instruct` tags for Qwen3-VL, not the bare ones.** The bare `qwen3-vl:8b` tag is the *thinking* variant: it burns minutes of thinking tokens per call and returns empty content when JSON output is enforced. The instruct variant answers directly in seconds.
 
 `qwen3-vl:4b-instruct` is available in the in-app model picker as a faster, smaller option:
 
@@ -44,7 +45,7 @@ Agent + vision: qwen3-vl:8b-instruct
 ollama pull qwen3-vl:4b-instruct
 ```
 
-If you want to test a different local tag, choose it in the app model picker or set the `jarvisLocalLLMModel` and `jarvisLocalVisionModel` app defaults.
+If you want to test a different local tag, choose it in the app model picker or set the `jarvisLocalRouterModel`, `jarvisLocalLLMModel`, and `jarvisLocalVisionModel` app defaults.
 
 ## Check Status
 

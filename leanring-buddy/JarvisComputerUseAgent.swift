@@ -46,7 +46,7 @@ final class JarvisComputerUseAgent {
 
     /// The model reports coordinates on this fixed relative grid regardless of
     /// the actual screenshot or display resolution (Qwen3-VL convention).
-    private static let modelCoordinateGridSize: Double = 1000
+    private static let modelCoordinateGridSize: Double = 768
 
     private let localLLMClient: JarvisLocalLLMClient
     private let toolRegistry: JarvisToolRegistry
@@ -108,11 +108,11 @@ final class JarvisComputerUseAgent {
 
             // 2. Think: ask the model for the single next action.
             //
-            // The screenshot is resized to exactly 1000x1000 pixels before it
+            // The screenshot is resized to exactly 768x768 pixels before it
             // is sent. Qwen-VL models ground clicks either on the official
-            // relative 1000x1000 grid or in the input image's pixel space
+            // relative grid or in the input image's pixel space
             // (local GGUF builds often do the latter). When the image itself
-            // is 1000x1000, both conventions produce identical numbers, so
+            // matches the grid, both conventions produce identical numbers, so
             // coordinates map correctly no matter which one the model uses.
             let modelScreenshotData = Self.resizeScreenshotToModelGrid(screenCapture.imageData)
                 ?? screenCapture.imageData
@@ -298,7 +298,7 @@ final class JarvisComputerUseAgent {
     private static let agentSystemPrompt = """
     You are Jarvis, a computer-use agent controlling a macOS computer with a mouse and keyboard.
     Each turn you receive: the user's goal, the history of actions already taken, and a screenshot of the CURRENT screen.
-    The screenshot is exactly 1000x1000 pixels and the screen's resolution is 1000x1000. All coordinates you output are pixel coordinates in this 1000x1000 image, with the origin at the top-left corner; x increases rightward and y increases downward.
+    The screenshot is exactly 768x768 pixels and the screen's resolution is 768x768. All coordinates you output are pixel coordinates in this 768x768 image, with the origin at the top-left corner; x increases rightward and y increases downward.
 
     Respond with EXACTLY ONE JSON object describing the single next action. No markdown, no extra text.
 
@@ -492,10 +492,10 @@ final class JarvisComputerUseAgent {
 
     // MARK: - Screenshot preparation
 
-    /// Resizes a captured screenshot to exactly 1000x1000 pixels (the model's
+    /// Resizes a captured screenshot to exactly 768x768 pixels (the model's
     /// coordinate grid size). This intentionally ignores aspect ratio: when the
     /// image dimensions equal the grid dimensions, the model's coordinates map
-    /// correctly whether it grounds on the relative 1000-grid or in the input
+    /// correctly whether it grounds on the relative grid or in the input
     /// image's pixel space. The aspect distortion is undone when grid
     /// coordinates are scaled back to the display's real width and height.
     private static func resizeScreenshotToModelGrid(_ originalImageData: Data) -> Data? {
@@ -531,9 +531,9 @@ final class JarvisComputerUseAgent {
         )
         NSGraphicsContext.restoreGraphicsState()
 
-        // Slightly lower quality shrinks the vision payload; coordinates use
-        // the same 1000x1000 grid either way.
-        return bitmapRep.representation(using: .jpeg, properties: [.compressionFactor: 0.65])
+        // Lower quality shrinks the vision payload; coordinates use the same
+        // square grid either way.
+        return bitmapRep.representation(using: .jpeg, properties: [.compressionFactor: 0.55])
     }
 
     // MARK: - Loop guard
