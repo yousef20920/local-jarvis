@@ -50,7 +50,7 @@ enum BuddyTranscriptionProviderFactory {
             return AppleSpeechTranscriptionProvider()
         }
 
-        print("🎙️ Transcription: defaulting to Apple Speech for local-only runtime")
+        print("🎙️ Transcription: defaulting to Apple Speech")
         return AppleSpeechTranscriptionProvider()
     }
 }

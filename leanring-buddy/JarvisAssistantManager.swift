@@ -4,8 +4,8 @@
 //
 //  Jarvis coordinator. Screen-independent commands (open app, press hotkey,
 //  type, screenshot) run through the deterministic rule planner for instant
-//  execution. Everything else runs through the local computer-use agent loop,
-//  which observes the screen before every action and adapts as it goes.
+//  execution. Everything else runs through the GPT-backed computer-use agent
+//  loop, which observes the screen before every action and adapts as it goes.
 //
 
 import Combine
@@ -44,7 +44,7 @@ final class JarvisAssistantManager: ObservableObject {
         self.toolRegistry = toolRegistry
         self.safetyPolicy = JarvisSafetyPolicy()
         self.computerUseAgent = JarvisComputerUseAgent(
-            localLLMClient: JarvisLocalLLMClient(),
+            openAIClient: JarvisOpenAIClient(),
             toolRegistry: toolRegistry,
             safetyPolicy: safetyPolicy
         )
@@ -59,7 +59,7 @@ final class JarvisAssistantManager: ObservableObject {
         self.toolRegistry = toolRegistry
         self.safetyPolicy = safetyPolicy
         self.computerUseAgent = JarvisComputerUseAgent(
-            localLLMClient: JarvisLocalLLMClient(),
+            openAIClient: JarvisOpenAIClient(),
             toolRegistry: toolRegistry,
             safetyPolicy: safetyPolicy
         )

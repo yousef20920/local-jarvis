@@ -789,39 +789,18 @@ struct CompanionPanelView: View {
         .padding(.vertical, 4)
     }
 
-    // MARK: - Model Picker
+    // MARK: - Model Status
 
     private var modelPickerRow: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("LOCAL AGENT MODEL")
+                Text("AGENT MODEL")
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .foregroundColor(DS.Colors.textSecondary)
 
                 Spacer()
 
-                HStack(spacing: 0) {
-                    modelOptionButton(label: "Qwen3-VL 8B", modelID: "qwen3-vl:8b-instruct")
-                    modelOptionButton(label: "Qwen3-VL 4B", modelID: "qwen3-vl:4b-instruct")
-                }
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color.white.opacity(0.04))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
-                )
-            }
-
-            HStack {
-                Text("LOCAL VISION MODEL")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundColor(DS.Colors.textSecondary)
-
-                Spacer()
-
-                Text(companionManager.selectedLocalVisionModel)
+                Text(companionManager.selectedOpenAIModel)
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundColor(DS.Colors.textPrimary)
                     .padding(.horizontal, 10)
@@ -832,36 +811,31 @@ struct CompanionPanelView: View {
                     )
             }
 
-            Text("Router: \(companionManager.selectedLocalRouterModel)    Fast path: rules    Agent loop + vision: \(companionManager.selectedLocalVisionModel)")
+            HStack {
+                Text("PROVIDER")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundColor(DS.Colors.textSecondary)
+
+                Spacer()
+
+                Text("OpenAI via Worker")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(DS.Colors.accentText.opacity(0.15))
+                    )
+            }
+
+            Text("Router: GPT-5.5    Fast path: rules    Agent loop + vision: GPT-5.5")
                 .font(.system(size: 9, design: .monospaced))
                 .foregroundColor(DS.Colors.textTertiary)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.vertical, 4)
-    }
-
-    private func modelOptionButton(label: String, modelID: String) -> some View {
-        let isSelected = companionManager.selectedLocalLLMModel == modelID
-        return Button(action: {
-            // Use one reliable multimodal model for routing, the agent loop,
-            // and screen-aware answers.
-            companionManager.setSelectedLocalLLMModel(modelID)
-            companionManager.setSelectedLocalRouterModel(modelID)
-            companionManager.setSelectedLocalVisionModel(modelID)
-        }) {
-            Text(label)
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(isSelected ? DS.Colors.accentText.opacity(0.15) : Color.clear)
-                )
-        }
-        .buttonStyle(.plain)
-        .pointerCursor()
     }
 
     // MARK: - DM Farza Button

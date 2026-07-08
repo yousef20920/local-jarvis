@@ -2,13 +2,10 @@
 //  JarvisComputerUseAgent.swift
 //  leanring-buddy
 //
-//  Local observe-act agent loop. Each iteration captures a fresh screenshot,
-//  asks the local Qwen3-VL model for the single next action toward the user's
-//  goal, maps the model's 1000x1000-grid coordinates to real screen
-//  coordinates, runs the action through the safety policy, executes it, and
-//  repeats until the model terminates, answers, hits the step cap, or the
-//  user cancels. This replaces the old plan-everything-upfront pipeline so
-//  Jarvis can see the result of each action and recover from misses.
+//  Observe-act agent loop. Each iteration captures a fresh screenshot, asks
+//  GPT-5.5 for the single next action toward the user's goal, maps the model's
+//  coordinate grid to real screen coordinates, runs the action through the
+//  safety policy, executes it, and repeats until the task is done.
 //
 
 import AppKit
@@ -45,19 +42,19 @@ final class JarvisComputerUseAgent {
     private static let maximumActionHistoryLineCount = 5
 
     /// The model reports coordinates on this fixed relative grid regardless of
-    /// the actual screenshot or display resolution (Qwen3-VL convention).
+    /// the actual screenshot or display resolution.
     private static let modelCoordinateGridSize: Double = 768
 
-    private let localLLMClient: JarvisLocalLLMClient
+    private let openAIClient: JarvisOpenAIClient
     private let toolRegistry: JarvisToolRegistry
     private let safetyPolicy: JarvisSafetyPolicy
 
     init(
-        localLLMClient: JarvisLocalLLMClient,
+        openAIClient: JarvisOpenAIClient,
         toolRegistry: JarvisToolRegistry,
         safetyPolicy: JarvisSafetyPolicy
     ) {
-        self.localLLMClient = localLLMClient
+        self.openAIClient = openAIClient
         self.toolRegistry = toolRegistry
         self.safetyPolicy = safetyPolicy
     }
@@ -109,11 +106,8 @@ final class JarvisComputerUseAgent {
             // 2. Think: ask the model for the single next action.
             //
             // The screenshot is resized to exactly 768x768 pixels before it
-            // is sent. Qwen-VL models ground clicks either on the official
-            // relative grid or in the input image's pixel space
-            // (local GGUF builds often do the latter). When the image itself
-            // matches the grid, both conventions produce identical numbers, so
-            // coordinates map correctly no matter which one the model uses.
+            // is sent so the model's coordinate output maps predictably to
+            // the captured display.
             let modelScreenshotData = Self.resizeScreenshotToModelGrid(screenCapture.imageData)
                 ?? screenCapture.imageData
             JarvisDebugLogger.logVerbose("Agent", "model input: \(Int(Self.modelCoordinateGridSize))x\(Int(Self.modelCoordinateGridSize))px")
@@ -127,14 +121,14 @@ final class JarvisComputerUseAgent {
 
             let modelResponseText: String
             do {
-                modelResponseText = try await localLLMClient.generateComputerUseTurn(
+                modelResponseText = try await openAIClient.generateComputerUseTurn(
                     systemPrompt: Self.agentSystemPrompt,
                     userPrompt: userPrompt,
                     screenshotBase64: modelScreenshotData.base64EncodedString()
                 )
             } catch {
                 JarvisDebugLogger.log("Agent", "model call FAILED: \(error.localizedDescription)")
-                return .failed(failureMessage: "The local model is unavailable: \(error.localizedDescription)")
+                return .failed(failureMessage: "GPT-5.5 is unavailable: \(error.localizedDescription)")
             }
 
             JarvisDebugLogger.logMultiline("Agent", title: "raw model response:", body: modelResponseText)
@@ -381,8 +375,7 @@ final class JarvisComputerUseAgent {
             return nil
         }
 
-        // Qwen3-VL's native computer-use convention wraps the action as
-        // {"name": "computer_use", "arguments": {...}} — unwrap if present.
+        // Be tolerant of wrapped tool-call style JSON if the model emits it.
         if let wrappedArguments = json["arguments"] as? [String: Any] {
             let outerReasoning = json["reasoning"] as? String
             json = wrappedArguments
@@ -563,7 +556,7 @@ final class JarvisComputerUseAgent {
 
     // MARK: - Coordinate mapping
 
-    /// Converts a point on the model's 1000x1000 grid (top-left origin) to a
+    /// Converts a point on the model's coordinate grid (top-left origin) to a
     /// global AppKit point (bottom-left origin) on the captured display.
     static func globalAppKitPoint(
         fromGridPoint gridPoint: CGPoint,

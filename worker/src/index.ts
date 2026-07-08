@@ -1,17 +1,20 @@
 /**
- * Clicky Proxy Worker
+ * Jarvis API Worker
  *
- * Proxies requests to Claude and ElevenLabs APIs so the app never
- * ships with raw API keys. Keys are stored as Cloudflare secrets.
+ * Keeps API keys out of the macOS app. The app sends prompts, screenshots,
+ * TTS text, or transcription-token requests here; the Worker calls upstream
+ * services using Cloudflare secrets.
  *
  * Routes:
- *   POST /chat  → Anthropic Messages API (streaming)
- *   POST /tts   → ElevenLabs TTS API
- *   POST /detect-element → Anthropic Computer Use element detection
+ *   POST /responses         -> OpenAI Responses API
+ *   POST /chat              -> OpenAI Responses API alias
+ *   POST /tts               -> ElevenLabs TTS API
+ *   POST /transcribe-token  -> AssemblyAI streaming token API
  */
 
 interface Env {
-  ANTHROPIC_API_KEY: string;
+  OPENAI_API_KEY: string;
+  OPENAI_MODEL?: string;
   ELEVENLABS_API_KEY: string;
   ELEVENLABS_VOICE_ID: string;
   ASSEMBLYAI_API_KEY: string;
@@ -26,8 +29,8 @@ export default {
     }
 
     try {
-      if (url.pathname === "/chat") {
-        return await handleChat(request, env);
+      if (url.pathname === "/responses" || url.pathname === "/chat") {
+        return await handleOpenAIResponses(request, env);
       }
 
       if (url.pathname === "/tts") {
@@ -37,39 +40,48 @@ export default {
       if (url.pathname === "/transcribe-token") {
         return await handleTranscribeToken(env);
       }
-
-      if (url.pathname === "/detect-element") {
-        return await handleDetectElement(request, env);
-      }
     } catch (error) {
       console.error(`[${url.pathname}] Unhandled error:`, error);
-      return new Response(
-        JSON.stringify({ error: String(error) }),
-        { status: 500, headers: { "content-type": "application/json" } }
-      );
+      return jsonResponse({ error: String(error) }, 500);
     }
 
     return new Response("Not found", { status: 404 });
   },
 };
 
-async function handleDetectElement(request: Request, env: Env): Promise<Response> {
-  const body = await request.text();
+async function handleOpenAIResponses(request: Request, env: Env): Promise<Response> {
+  if (!env.OPENAI_API_KEY) {
+    return jsonResponse({ error: "OPENAI_API_KEY is not configured." }, 500);
+  }
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const requestBodyText = await request.text();
+  let requestBody: Record<string, unknown>;
+
+  try {
+    requestBody = JSON.parse(requestBodyText) as Record<string, unknown>;
+  } catch {
+    return jsonResponse({ error: "Request body must be valid JSON." }, 400);
+  }
+
+  const openAIRequestBody = {
+    ...requestBody,
+    model: typeof requestBody.model === "string"
+      ? requestBody.model
+      : env.OPENAI_MODEL || "gpt-5.5",
+  };
+
+  const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
-      "x-api-key": env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "anthropic-beta": "computer-use-2025-11-24",
+      authorization: `Bearer ${env.OPENAI_API_KEY}`,
       "content-type": "application/json",
     },
-    body,
+    body: JSON.stringify(openAIRequestBody),
   });
 
   if (!response.ok) {
     const errorBody = await response.text();
-    console.error(`[/detect-element] Anthropic API error ${response.status}: ${errorBody}`);
+    console.error(`[/responses] OpenAI API error ${response.status}: ${errorBody}`);
     return new Response(errorBody, {
       status: response.status,
       headers: { "content-type": "application/json" },
@@ -80,37 +92,6 @@ async function handleDetectElement(request: Request, env: Env): Promise<Response
     status: response.status,
     headers: {
       "content-type": response.headers.get("content-type") || "application/json",
-      "cache-control": "no-cache",
-    },
-  });
-}
-
-async function handleChat(request: Request, env: Env): Promise<Response> {
-  const body = await request.text();
-
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body,
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error(`[/chat] Anthropic API error ${response.status}: ${errorBody}`);
-    return new Response(errorBody, {
-      status: response.status,
-      headers: { "content-type": "application/json" },
-    });
-  }
-
-  return new Response(response.body, {
-    status: response.status,
-    headers: {
-      "content-type": response.headers.get("content-type") || "text/event-stream",
       "cache-control": "no-cache",
     },
   });
@@ -174,5 +155,12 @@ async function handleTTS(request: Request, env: Env): Promise<Response> {
     headers: {
       "content-type": response.headers.get("content-type") || "audio/mpeg",
     },
+  });
+}
+
+function jsonResponse(body: unknown, status: number): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
   });
 }

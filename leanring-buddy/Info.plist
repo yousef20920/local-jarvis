@@ -4,6 +4,8 @@
 <dict>
 	<key>LSUIElement</key>
 	<true/>
+	<key>JarvisOpenAIResponsesProxyURL</key>
+	<string>http://127.0.0.1:8787/responses</string>
 	<key>SUFeedURL</key>
 	<string>https://raw.githubusercontent.com/julianjear/makesomething-mac-app/main/appcast.xml</string>
 	<key>SUPublicEDKey</key>

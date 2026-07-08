@@ -2,9 +2,9 @@
 //  JarvisVoiceIntentRouter.swift
 //  leanring-buddy
 //
-//  Local LLM router for deciding whether a spoken transcript should be handled
-//  as a Mac action, a screen-aware companion answer, or an action followed by
-//  a screen-aware answer.
+//  GPT-backed router for deciding whether a spoken transcript should be
+//  handled as a Mac action, a screen-aware companion answer, or an action
+//  followed by a screen-aware answer.
 //
 
 import Foundation
@@ -23,23 +23,10 @@ struct JarvisVoiceIntentDecision {
 }
 
 final class JarvisVoiceIntentRouter {
-    private let localLLMClient: JarvisLocalLLMClient
+    private let openAIClient: JarvisOpenAIClient
 
-    init(localLLMClient: JarvisLocalLLMClient = JarvisLocalLLMClient()) {
-        self.localLLMClient = localLLMClient
-    }
-
-    func warmUp() async {
-        do {
-            let startTime = Date()
-            _ = try await routeWithReliableModel(
-                "do you see this page?"
-            )
-            let elapsed = Date().timeIntervalSince(startTime)
-            JarvisDebugLogger.log("Route", "router warmup complete in \(String(format: "%.1f", elapsed))s")
-        } catch {
-            JarvisDebugLogger.log("Route", "router warmup skipped: \(error.localizedDescription)")
-        }
+    init(openAIClient: JarvisOpenAIClient = JarvisOpenAIClient()) {
+        self.openAIClient = openAIClient
     }
 
     func route(transcript: String) async -> JarvisVoiceIntentDecision {
@@ -56,7 +43,7 @@ final class JarvisVoiceIntentRouter {
         JarvisDebugLogger.logVerbose("Route", "routing transcript: \"\(trimmedTranscript)\"")
 
         do {
-            let responseText = try await routeWithReliableModel(trimmedTranscript)
+            let responseText = try await routeWithGPT(trimmedTranscript)
             JarvisDebugLogger.logMultiline("Route", title: "router raw response:", body: responseText)
             let decision = Self.parseDecision(responseText: responseText, fallbackTranscript: trimmedTranscript)
             JarvisDebugLogger.log("Route", "\(decision.route.rawValue) — \(decision.reason)")
@@ -72,17 +59,16 @@ final class JarvisVoiceIntentRouter {
         }
     }
 
-    private func routeWithReliableModel(_ trimmedTranscript: String) async throws -> String {
-        try await localLLMClient.generateComputerUseTurn(
-            systemPrompt: "You are the local voice intent router. Return only valid JSON.",
-            userPrompt: Self.routerPrompt(transcript: trimmedTranscript),
-            modelOverride: JarvisLocalLLMConfiguration.current.routerModel
+    private func routeWithGPT(_ trimmedTranscript: String) async throws -> String {
+        try await openAIClient.generateComputerUseTurn(
+            systemPrompt: "You are the Jarvis voice intent router. Return only valid JSON.",
+            userPrompt: Self.routerPrompt(transcript: trimmedTranscript)
         )
     }
 
     private static func routerPrompt(transcript: String) -> String {
         """
-        Route one spoken command for a local Mac assistant.
+        Route one spoken command for a Mac assistant.
         Return exactly one flat JSON object and nothing else.
         Required keys: route, action_command, vision_prompt, reason.
         Do not wrap the object inside another key. Do not include markdown.

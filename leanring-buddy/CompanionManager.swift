@@ -32,7 +32,7 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var hasScreenContentPermission = false
 
     /// Screen location (global AppKit coords) of a detected UI element the
-    /// buddy should fly to and point at. Parsed from the local vision response;
+    /// buddy should fly to and point at. Parsed from the vision response;
     /// observed by BlueCursorView to trigger the flight animation.
     @Published var detectedElementScreenLocation: CGPoint?
     /// The display frame (global AppKit coords) of the screen the detected
@@ -73,13 +73,13 @@ final class CompanionManager: ObservableObject {
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
-    /// Local Ollama client used for the screen-aware companion voice response.
-    private let localLLMVisionClient = JarvisLocalLLMClient()
+    /// GPT client used for screen-aware companion voice responses.
+    private let openAIVisionClient = JarvisOpenAIClient()
     private let voiceIntentRouter = JarvisVoiceIntentRouter()
     private var localSpeechSynthesizer: NSSpeechSynthesizer?
 
-    /// Conversation history so the local companion model remembers prior exchanges within a session.
-    /// Each entry is the user's transcript and the local assistant response.
+    /// Conversation history so GPT remembers prior exchanges within a session.
+    /// Each entry is the user's transcript and Jarvis' response.
     private var conversationHistory: [(userTranscript: String, assistantResponse: String)] = []
 
     /// The currently running AI response task, if any. Cancelled when the user
@@ -105,29 +105,7 @@ final class CompanionManager: ObservableObject {
     /// Used by the panel to show accurate status text ("Active" vs "Ready").
     @Published private(set) var isOverlayVisible: Bool = false
 
-    @Published var selectedLocalLLMModel: String = JarvisLocalLLMConfiguration.storedModelName(forKey: "jarvisLocalLLMModel")
-        ?? JarvisLocalLLMConfiguration.defaultModelName
-
-    func setSelectedLocalLLMModel(_ model: String) {
-        selectedLocalLLMModel = model
-        UserDefaults.standard.set(model, forKey: "jarvisLocalLLMModel")
-    }
-
-    @Published var selectedLocalRouterModel: String = JarvisLocalLLMConfiguration.storedRouterModelName()
-        ?? JarvisLocalLLMConfiguration.defaultRouterModelName
-
-    func setSelectedLocalRouterModel(_ model: String) {
-        selectedLocalRouterModel = model
-        UserDefaults.standard.set(model, forKey: "jarvisLocalRouterModel")
-    }
-
-    @Published var selectedLocalVisionModel: String = JarvisLocalLLMConfiguration.storedModelName(forKey: "jarvisLocalVisionModel")
-        ?? JarvisLocalLLMConfiguration.defaultModelName
-
-    func setSelectedLocalVisionModel(_ model: String) {
-        selectedLocalVisionModel = model
-        UserDefaults.standard.set(model, forKey: "jarvisLocalVisionModel")
-    }
+    @Published var selectedOpenAIModel: String = JarvisOpenAIConfiguration.modelDisplayName
 
     /// User preference for whether the Clicky cursor should be shown.
     /// When toggled off, the overlay is hidden and push-to-talk is disabled.
@@ -192,9 +170,6 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
-        Task {
-            await voiceIntentRouter.warmUp()
-        }
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
         // were revoked (e.g. signing change), don't show the cursor — the
@@ -572,7 +547,7 @@ final class CompanionManager: ObservableObject {
             let intentDecision = await voiceIntentRouter.route(transcript: transcript)
             if intentDecision.route == .vision {
                 JarvisDebugLogger.log("Voice", "vision: \"\(intentDecision.visionPrompt)\"")
-                sendTranscriptToLocalVisionWithScreenshot(transcript: intentDecision.visionPrompt)
+                sendTranscriptToOpenAIVisionWithScreenshot(transcript: intentDecision.visionPrompt)
                 return
             }
 
@@ -587,7 +562,7 @@ final class CompanionManager: ObservableObject {
                 JarvisDebugLogger.logVerbose("Voice", "action_then_vision follow-up: \"\(intentDecision.visionPrompt)\"")
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard !Task.isCancelled else { return }
-                sendTranscriptToLocalVisionWithScreenshot(transcript: intentDecision.visionPrompt)
+                sendTranscriptToOpenAIVisionWithScreenshot(transcript: intentDecision.visionPrompt)
                 return
             }
 
@@ -718,7 +693,7 @@ final class CompanionManager: ObservableObject {
     // MARK: - AI Response Pipeline
 
     /// Captures the display containing the cursor, sends it with the
-    /// transcript to the local Ollama vision model, and speaks the response with
+    /// transcript to GPT-5.5 through the Worker, and speaks the response with
     /// macOS system TTS.
     /// The response may include a [POINT:x,y:label] tag which triggers the buddy
     /// to fly to that element on screen, or a [SEARCH:query] tag which escalates
@@ -727,7 +702,7 @@ final class CompanionManager: ObservableObject {
     /// - Parameter allowSearchEscalation: When true (the default), a [SEARCH:query]
     ///   response triggers a browser search and one follow-up vision call on the
     ///   results page. The follow-up call passes false so escalation cannot loop.
-    private func sendTranscriptToLocalVisionWithScreenshot(
+    private func sendTranscriptToOpenAIVisionWithScreenshot(
         transcript: String,
         allowSearchEscalation: Bool = true
     ) {
@@ -756,9 +731,8 @@ final class CompanionManager: ObservableObject {
                     (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                 }
 
-                // Use the local Ollama vision model (qwen3-vl by default) directly.
-                // Non-streaming is fine — TTS handles all spoken output.
-                let fullResponseText = try await localLLMVisionClient.generateVisionChat(
+                // Non-streaming is fine here because TTS handles the spoken output.
+                let fullResponseText = try await openAIVisionClient.generateVisionChat(
                     userPrompt: transcript,
                     systemPrompt: Self.companionVoiceResponseSystemPrompt,
                     imageDataArray: labeledImages.map { $0.data },
@@ -785,7 +759,7 @@ final class CompanionManager: ObservableObject {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
                     guard !Task.isCancelled else { return }
 
-                    sendTranscriptToLocalVisionWithScreenshot(
+                    sendTranscriptToOpenAIVisionWithScreenshot(
                         transcript: transcript,
                         allowSearchEscalation: false
                     )
@@ -796,7 +770,7 @@ final class CompanionManager: ObservableObject {
                 // follow-up) must never be spoken aloud.
                 let responseTextWithoutSearchTag = searchEscalation.textWithoutTag
 
-                // Parse the [POINT:...] tag from the local vision response
+                // Parse the [POINT:...] tag from the vision response.
                 let responseTextWithPointTag = responseTextWithoutSearchTag.contains("[POINT:")
                     ? responseTextWithoutSearchTag
                     : "\(responseTextWithoutSearchTag) [POINT:none]"
@@ -921,7 +895,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private func speakLocalErrorFallback() {
-        let utterance = "I couldn't get a local vision response from Ollama."
+        let utterance = "I couldn't get a response from GPT."
         print("🗣️ Jarvis said: \(utterance)")
         localSpeechSynthesizer?.stopSpeaking()
         let synthesizer = NSSpeechSynthesizer()
@@ -938,7 +912,7 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Search Escalation Tag Parsing
 
-    /// Extracts a [SEARCH:query] tag from the local vision response. Returns
+    /// Extracts a [SEARCH:query] tag from the vision response. Returns
     /// the search query (or nil when no tag is present) plus the response text
     /// with the tag removed so it can never leak into spoken output.
     static func parseSearchEscalation(from responseText: String) -> (searchQuery: String?, textWithoutTag: String) {
@@ -964,7 +938,7 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Point Tag Parsing
 
-    /// Result of parsing a [POINT:...] tag from the local vision response.
+    /// Result of parsing a [POINT:...] tag from the vision response.
     struct PointingParseResult {
         /// The response text with the [POINT:...] tag removed — this is what gets spoken.
         let spokenText: String
@@ -976,7 +950,7 @@ final class CompanionManager: ObservableObject {
         let screenNumber: Int?
     }
 
-    /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of the local vision response.
+    /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of the vision response.
     /// Returns the spoken text (tag removed) and the optional coordinate + label + screen number.
     static func parsePointingCoordinates(from responseText: String) -> PointingParseResult {
         // Match [POINT:none] or [POINT:123,456:label] or [POINT:123,456:label:screen2]
@@ -1144,8 +1118,8 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Onboarding Demo Interaction
 
-    /// Triggers a local-only pointing demo during onboarding. This avoids any
-    /// cloud LLM dependency while still showing that the overlay can navigate.
+    /// Triggers an on-device pointing demo during onboarding. This avoids any
+    /// model call while still showing that the overlay can navigate.
     func performOnboardingDemoInteraction() {
         // Don't interrupt an active voice response
         guard voiceState == .idle || voiceState == .responding else { return }
@@ -1155,9 +1129,9 @@ final class CompanionManager: ObservableObject {
         }
 
         let displayFrame = cursorScreen.frame
-        detectedElementBubbleText = "local mode"
+        detectedElementBubbleText = "Jarvis mode"
         detectedElementScreenLocation = CGPoint(x: displayFrame.midX, y: displayFrame.midY)
         detectedElementDisplayFrame = displayFrame
-        print("🎯 Onboarding demo: local-only center-screen pointer")
+        print("🎯 Onboarding demo: center-screen pointer")
     }
 }

@@ -3,7 +3,7 @@
 //  leanring-buddy
 //
 //  Planner contracts for turning user commands into structured Jarvis tool
-//  calls. Phase 1 defines the boundary without invoking an LLM or tools.
+//  calls. Phase 1 defines the boundary without invoking a model or tools.
 //
 
 import Foundation
