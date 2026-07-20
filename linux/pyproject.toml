@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-jarvis-linux"
+version = "0.1.0"
+description = "Linux desktop client for Local Jarvis"
+requires-python = ">=3.10"
+dependencies = [
+    "mss>=9.0,<11",
+    "Pillow>=10.0,<12",
+    "PyAutoGUI>=0.9.54,<1",
+    "pyperclip>=1.8,<2",
+]
+
+[project.scripts]
+local-jarvis = "local_jarvis_linux.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

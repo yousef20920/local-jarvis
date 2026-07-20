@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Local Jarvis
+Comment=Screen-aware Linux desktop assistant
+Exec=local-jarvis --gui
+Icon=local-jarvis
+Terminal=false
+Categories=Utility;Accessibility;
