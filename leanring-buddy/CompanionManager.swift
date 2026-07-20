@@ -14,7 +14,7 @@ import PostHog
 import ScreenCaptureKit
 import SwiftUI
 
-enum CompanionVoiceState {
+enum CompanionVoiceState: Equatable {
     case idle
     case listening
     case processing
@@ -23,6 +23,7 @@ enum CompanionVoiceState {
 
 @MainActor
 final class CompanionManager: ObservableObject {
+    private static let maximumWebResearchAttemptCount = 4
     @Published private(set) var voiceState: CompanionVoiceState = .idle
     @Published private(set) var lastTranscript: String?
     @Published private(set) var currentAudioPowerLevel: CGFloat = 0
@@ -30,6 +31,7 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var hasScreenRecordingPermission = false
     @Published private(set) var hasMicrophonePermission = false
     @Published private(set) var hasScreenContentPermission = false
+    @Published private(set) var lastInternetSources: [JarvisInternetSource] = []
 
     /// Screen location (global AppKit coords) of a detected UI element the
     /// buddy should fly to and point at. Parsed from the vision response;
@@ -85,15 +87,22 @@ final class CompanionManager: ObservableObject {
     /// The currently running AI response task, if any. Cancelled when the user
     /// speaks again so a new response can begin immediately.
     private var currentResponseTask: Task<Void, Never>?
+    /// Computer-use work has a separate lifetime from short answers. A new
+    /// question may replace the current spoken response without cancelling an
+    /// hour-long task that Jarvis is already carrying out.
+    private var activeJarvisCommandTask: Task<Void, Never>?
+    private var activeJarvisCommandIdentifier: UUID?
 
     private var shortcutTransitionCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
     private var audioPowerCancellable: AnyCancellable?
+    private var continuousListeningStateCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
     /// Scheduled hide for transient cursor mode — cancelled if the user
     /// speaks again before the delay elapses.
     private var transientHideTask: Task<Void, Never>?
+    private var continuousListeningMaintenanceTask: Task<Void, Never>?
 
     /// True when all three required permissions (accessibility, screen recording,
     /// microphone) are granted. Used by the panel to show a single "all good" state.
@@ -106,6 +115,24 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var isOverlayVisible: Bool = false
 
     @Published var selectedOpenAIModel: String = JarvisOpenAIConfiguration.modelDisplayName
+
+    @Published private(set) var isAlwaysListeningActive = false
+    @Published private(set) var isAlwaysListeningEnabled: Bool = UserDefaults.standard.object(forKey: "isAlwaysListeningEnabled") == nil
+        ? true
+        : UserDefaults.standard.bool(forKey: "isAlwaysListeningEnabled")
+
+    func setAlwaysListeningEnabled(_ enabled: Bool) {
+        isAlwaysListeningEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isAlwaysListeningEnabled")
+
+        if enabled {
+            Task { [weak self] in
+                await self?.maintainContinuousListeningSession()
+            }
+        } else {
+            buddyDictationManager.stopContinuousListening()
+        }
+    }
 
     /// User preference for whether the Clicky cursor should be shown.
     /// When toggled off, the overlay is hidden and push-to-talk is disabled.
@@ -169,7 +196,9 @@ final class CompanionManager: ObservableObject {
         startPermissionPolling()
         bindVoiceStateObservation()
         bindAudioPowerLevel()
+        bindContinuousListeningStateObservation()
         bindShortcutTransitions()
+        startContinuousListeningMaintenance()
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
         // were revoked (e.g. signing change), don't show the cursor — the
@@ -186,6 +215,7 @@ final class CompanionManager: ObservableObject {
     /// Triggers the onboarding sequence — dismisses the panel and restarts
     /// the overlay so the welcome animation and intro video play.
     func triggerOnboarding() {
+        buddyDictationManager.stopContinuousListening()
         // Post notification so the panel manager can dismiss the panel
         NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
 
@@ -279,12 +309,18 @@ final class CompanionManager: ObservableObject {
         buddyDictationManager.cancelCurrentDictation()
         overlayWindowManager.hideOverlay()
         transientHideTask?.cancel()
+        continuousListeningMaintenanceTask?.cancel()
+        continuousListeningMaintenanceTask = nil
 
         currentResponseTask?.cancel()
         currentResponseTask = nil
+        activeJarvisCommandTask?.cancel()
+        activeJarvisCommandTask = nil
+        activeJarvisCommandIdentifier = nil
         shortcutTransitionCancellable?.cancel()
         voiceStateCancellable?.cancel()
         audioPowerCancellable?.cancel()
+        continuousListeningStateCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
     }
@@ -414,6 +450,47 @@ final class CompanionManager: ObservableObject {
             }
     }
 
+    private func bindContinuousListeningStateObservation() {
+        continuousListeningStateCancellable = buddyDictationManager.$isRecordingContinuously
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isRecordingContinuously in
+                self?.isAlwaysListeningActive = isRecordingContinuously
+            }
+    }
+
+    private func startContinuousListeningMaintenance() {
+        continuousListeningMaintenanceTask?.cancel()
+        continuousListeningMaintenanceTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.maintainContinuousListeningSession()
+                do {
+                    try await Task.sleep(for: .milliseconds(750))
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func maintainContinuousListeningSession() async {
+        guard isAlwaysListeningEnabled,
+              hasCompletedOnboarding,
+              allPermissionsGranted,
+              !showOnboardingVideo,
+              voiceState != .responding,
+              !buddyDictationManager.isDictationInProgress else {
+            return
+        }
+
+        await buddyDictationManager.startContinuousListening { [weak self] finalTranscript in
+            guard let self else { return }
+            self.lastTranscript = finalTranscript
+            print("🗣️ Always-listening transcript: \(finalTranscript)")
+            ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
+            self.handleFinalVoiceTranscript(finalTranscript)
+        }
+    }
+
     private func bindVoiceStateObservation() {
         voiceStateCancellable = buddyDictationManager.$isRecordingFromKeyboardShortcut
             .combineLatest(
@@ -460,6 +537,10 @@ final class CompanionManager: ObservableObject {
     private func handleShortcutTransition(_ transition: BuddyPushToTalkShortcut.ShortcutTransition) {
         switch transition {
         case .pressed:
+            // An explicit hotkey press temporarily takes priority over the
+            // hands-free microphone session. The maintenance loop resumes
+            // continuous listening after the push-to-talk interaction ends.
+            buddyDictationManager.stopContinuousListening()
             guard !buddyDictationManager.isDictationInProgress else { return }
             // Don't register push-to-talk while the onboarding video is playing
             guard !showOnboardingVideo else { return }
@@ -539,8 +620,16 @@ final class CompanionManager: ObservableObject {
     }
 
     private func runJarvisCommandFromVoice(transcript: String) {
+        if handlePendingJarvisConfirmation(transcript: transcript) {
+            return
+        }
+        if handleSavedJarvisTaskCommand(transcript: transcript) {
+            return
+        }
+
         currentResponseTask?.cancel()
         localSpeechSynthesizer?.stopSpeaking()
+        lastInternetSources = []
 
         currentResponseTask = Task {
             voiceState = .processing
@@ -551,27 +640,241 @@ final class CompanionManager: ObservableObject {
                 return
             }
 
+            if intentDecision.route == .webResearch {
+                await answerQuestionFromInternet(intentDecision.visionPrompt)
+                return
+            }
+
             // Action commands run through the computer-use agent loop, which
             // always returns an explicit result: a completion summary, a
             // spoken answer, or a clear failure message. No silent fallback.
             JarvisDebugLogger.log("Voice", "action: \"\(intentDecision.actionCommand)\"")
-            let spokenStatus = await jarvisAssistantManager.runTextCommand(intentDecision.actionCommand)
-            guard !Task.isCancelled else { return }
+            let followUpVisionPrompt = intentDecision.route == .actionThenVision
+                ? intentDecision.visionPrompt
+                : nil
+            let didStartTask = startLongRunningJarvisTask(
+                followUpVisionPrompt: followUpVisionPrompt
+            ) { [weak self] in
+                guard let self else { return "Jarvis stopped before the task began." }
+                return await self.jarvisAssistantManager.runTextCommand(intentDecision.actionCommand)
+            }
+            if !didStartTask {
+                await speakJarvisStatus("I'm still working on the current task. You can ask me questions, or say Jarvis stop before starting another task.")
+                if !Task.isCancelled {
+                    voiceState = .idle
+                    scheduleTransientHideIfNeeded()
+                }
+            }
+        }
+    }
 
-            if intentDecision.route == .actionThenVision {
-                JarvisDebugLogger.logVerbose("Voice", "action_then_vision follow-up: \"\(intentDecision.visionPrompt)\"")
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                guard !Task.isCancelled else { return }
-                sendTranscriptToOpenAIVisionWithScreenshot(transcript: intentDecision.visionPrompt)
+    /// Owns computer work independently from `currentResponseTask`. This is
+    /// what lets Always Listen answer a side question without implicitly
+    /// abandoning the task already running on the Mac.
+    @discardableResult
+    private func startLongRunningJarvisTask(
+        followUpVisionPrompt: String? = nil,
+        operation: @escaping @MainActor () async -> String
+    ) -> Bool {
+        guard activeJarvisCommandTask == nil else { return false }
+
+        let commandIdentifier = UUID()
+        activeJarvisCommandIdentifier = commandIdentifier
+        activeJarvisCommandTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.activeJarvisCommandIdentifier == commandIdentifier {
+                    self.activeJarvisCommandTask = nil
+                    self.activeJarvisCommandIdentifier = nil
+                }
+            }
+            self.voiceState = .processing
+            let spokenStatus = await operation()
+
+            guard !Task.isCancelled,
+                  self.activeJarvisCommandIdentifier == commandIdentifier else {
                 return
             }
 
-            await speakJarvisStatus(spokenStatus)
+            if let followUpVisionPrompt,
+               !followUpVisionPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                JarvisDebugLogger.logVerbose(
+                    "Voice",
+                    "action_then_vision follow-up: \"\(followUpVisionPrompt)\""
+                )
+                do {
+                    try await Task.sleep(for: .seconds(2))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                self.sendTranscriptToOpenAIVisionWithScreenshot(transcript: followUpVisionPrompt)
+            } else {
+                await self.speakJarvisStatus(spokenStatus)
+                guard !Task.isCancelled else { return }
+                self.voiceState = .idle
+                self.scheduleTransientHideIfNeeded()
+            }
+        }
+        return true
+    }
+
+    private func handlePendingJarvisConfirmation(transcript: String) -> Bool {
+        guard case .waitingForConfirmation(let pendingToolCall, _) = jarvisAssistantManager.state else {
+            return false
+        }
+
+        let normalizedTranscript = transcript
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+        let confirmsAction = [
+            "yes", "allow", "confirm", "approve", "go ahead", "do it",
+            "run it", "continue"
+        ].contains(normalizedTranscript)
+        let declinesAction = [
+            "no", "deny", "cancel", "cancel it", "don't", "do not",
+            "discard", "stop"
+        ].contains(normalizedTranscript)
+
+        currentResponseTask?.cancel()
+        localSpeechSynthesizer?.stopSpeaking()
+        currentResponseTask = Task {
+            if confirmsAction {
+                if pendingToolCall.toolName == "run_terminal_command" {
+                    await speakJarvisStatus("Please open the Jarvis panel to review the exact terminal command before allowing it.")
+                    if !Task.isCancelled {
+                        voiceState = .idle
+                        scheduleTransientHideIfNeeded()
+                    }
+                    return
+                }
+                await speakJarvisStatus("Okay. I'll run that exact action and continue.")
+                guard !Task.isCancelled else { return }
+                let didStartTask = startLongRunningJarvisTask { [weak self] in
+                    guard let self else { return "Jarvis stopped before the action ran." }
+                    return await self.jarvisAssistantManager.confirmPendingActionAndResume()
+                }
+                if didStartTask {
+                    return
+                }
+                await speakJarvisStatus("I'm already working on a task.")
+            } else if declinesAction {
+                jarvisAssistantManager.discardSavedTask()
+                await speakJarvisStatus("Okay. I cancelled that task.")
+            } else {
+                await speakJarvisStatus("That action needs permission. Say allow to run it once, or cancel to discard the task.")
+            }
 
             if !Task.isCancelled {
                 voiceState = .idle
                 scheduleTransientHideIfNeeded()
             }
+        }
+        return true
+    }
+
+    private func handleSavedJarvisTaskCommand(transcript: String) -> Bool {
+        guard jarvisAssistantManager.resumableCheckpoint != nil else {
+            return false
+        }
+        switch jarvisAssistantManager.state {
+        case .planning, .executing:
+            return false
+        default:
+            break
+        }
+
+        let normalizedTranscript = transcript
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+        let resumesTask = [
+            "resume", "resume task", "resume the task", "continue task",
+            "continue the task", "keep going"
+        ].contains(normalizedTranscript)
+        let discardsTask = [
+            "discard task", "discard the task", "cancel saved task",
+            "forget the task"
+        ].contains(normalizedTranscript)
+        guard resumesTask || discardsTask else { return false }
+
+        currentResponseTask?.cancel()
+        localSpeechSynthesizer?.stopSpeaking()
+        currentResponseTask = Task {
+            if resumesTask {
+                await speakJarvisStatus("Resuming the saved task.")
+                guard !Task.isCancelled else { return }
+                let didStartTask = startLongRunningJarvisTask { [weak self] in
+                    guard let self else { return "Jarvis stopped before the task resumed." }
+                    return await self.jarvisAssistantManager.resumeSavedTask()
+                }
+                if didStartTask {
+                    return
+                }
+                await speakJarvisStatus("I'm already working on a task.")
+            } else {
+                jarvisAssistantManager.discardSavedTask()
+                await speakJarvisStatus("Okay. I discarded the saved task.")
+            }
+
+            if !Task.isCancelled {
+                voiceState = .idle
+                scheduleTransientHideIfNeeded()
+            }
+        }
+        return true
+    }
+
+    func submitTextRequest(_ requestText: String) {
+        let trimmedRequestText = requestText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedRequestText.isEmpty else { return }
+        lastTranscript = trimmedRequestText
+        runJarvisCommandFromVoice(transcript: trimmedRequestText)
+    }
+
+    private func answerQuestionFromInternet(_ question: String) async {
+        JarvisDebugLogger.log("Voice", "web research: \"\(question)\"")
+        lastInternetSources = []
+
+        do {
+            let historyForAPI = conversationHistory.map { entry in
+                (userText: entry.userTranscript, assistantText: entry.assistantResponse)
+            }
+            let webGroundedAnswer = try await JarvisComputerUseAgent.performRetriableOperation(
+                operationName: "cited web research",
+                maximumAttemptCount: Self.maximumWebResearchAttemptCount,
+                isCancelled: { false },
+                shouldRetry: JarvisComputerUseAgent.shouldRetryModelRequest
+            ) {
+                try await self.openAIVisionClient.generateWebGroundedAnswer(
+                    userPrompt: question,
+                    conversationHistory: historyForAPI
+                )
+            }
+            guard !Task.isCancelled else { return }
+
+            lastInternetSources = webGroundedAnswer.sources
+            conversationHistory.append((
+                userTranscript: question,
+                assistantResponse: webGroundedAnswer.spokenAnswer
+            ))
+            if conversationHistory.count > 10 {
+                conversationHistory.removeFirst(conversationHistory.count - 10)
+            }
+
+            await speakJarvisStatus(webGroundedAnswer.spokenAnswer)
+        } catch is CancellationError {
+            return
+        } catch {
+            if Self.isCancellationError(error) {
+                return
+            }
+            JarvisDebugLogger.log("Voice", "web research failed: \(error.localizedDescription)")
+            await speakJarvisStatus("I couldn't verify that on the internet right now.")
+        }
+
+        if !Task.isCancelled {
+            voiceState = .idle
+            scheduleTransientHideIfNeeded()
         }
     }
 
@@ -586,6 +889,9 @@ final class CompanionManager: ObservableObject {
     private func stopCurrentJarvisInteraction() {
         currentResponseTask?.cancel()
         currentResponseTask = nil
+        activeJarvisCommandTask?.cancel()
+        activeJarvisCommandTask = nil
+        activeJarvisCommandIdentifier = nil
         localSpeechSynthesizer?.stopSpeaking()
         jarvisAssistantManager.stop()
         clearDetectedElementLocation()
@@ -598,17 +904,29 @@ final class CompanionManager: ObservableObject {
         guard !trimmedMessage.isEmpty else { return }
 
         print("🗣️ Jarvis said: \(trimmedMessage)")
+        // Do not let hands-free transcription hear Jarvis' own synthesized
+        // voice. The maintenance loop resumes listening after speech ends.
+        buddyDictationManager.stopContinuousListening()
         localSpeechSynthesizer?.stopSpeaking()
         let synthesizer = NSSpeechSynthesizer()
         localSpeechSynthesizer = synthesizer
         synthesizer.startSpeaking(trimmedMessage)
         voiceState = .responding
+
+        while synthesizer.isSpeaking && !Task.isCancelled {
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch {
+                synthesizer.stopSpeaking()
+                return
+            }
+        }
     }
 
     /// Flies the blue cursor to the target before pointer-based agent actions
     /// (clicks, drags, mouse moves) so the user can see where Jarvis is about to act.
     private func visualizeJarvisToolExecution(_ toolCall: JarvisToolCall) async {
-        let pointerToolNames: Set<String> = ["click_at", "double_click", "right_click", "move_mouse", "drag"]
+        let pointerToolNames: Set<String> = ["click_at", "confirm_click_at", "double_click", "right_click", "move_mouse", "drag"]
         guard pointerToolNames.contains(toolCall.toolName),
               let x = toolCall.arguments["x"]?.numberValue,
               let y = toolCall.arguments["y"]?.numberValue else {
@@ -860,7 +1178,7 @@ final class CompanionManager: ObservableObject {
                 }
                 ClickyAnalytics.trackResponseError(error: error.localizedDescription)
                 print("⚠️ Companion response error: \(error)")
-                speakLocalErrorFallback()
+                await speakLocalErrorFallback()
             }
 
             if !Task.isCancelled {
@@ -894,14 +1212,8 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    private func speakLocalErrorFallback() {
-        let utterance = "I couldn't get a response from GPT."
-        print("🗣️ Jarvis said: \(utterance)")
-        localSpeechSynthesizer?.stopSpeaking()
-        let synthesizer = NSSpeechSynthesizer()
-        localSpeechSynthesizer = synthesizer
-        synthesizer.startSpeaking(utterance)
-        voiceState = .responding
+    private func speakLocalErrorFallback() async {
+        await speakJarvisStatus("I couldn't get a response from GPT.")
     }
 
     private static func isCancellationError(_ error: Error) -> Bool {
@@ -1065,7 +1377,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private func startOnboardingPromptStream() {
-        let message = "press control + option and introduce yourself"
+        let message = "say hello and introduce yourself"
         onboardingPromptText = ""
         showOnboardingPrompt = true
         onboardingPromptOpacity = 0.0

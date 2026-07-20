@@ -21,6 +21,90 @@ enum JarvisComputerUseAgentOutcome: Equatable {
     case stopped
 }
 
+struct JarvisComputerUseCheckpoint: Codable, Equatable {
+    let userGoal: String
+    var recentActionHistoryLines: [String]
+    var nextStepNumber: Int
+    let taskCreatedAt: Date
+    var lastUpdatedAt: Date
+    var pendingConfirmationToolCall: JarvisToolCall?
+    var pendingConfirmationReason: String?
+    var hasApprovedTerminalAccessForTask: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case userGoal
+        case recentActionHistoryLines
+        case nextStepNumber
+        case taskCreatedAt
+        case lastUpdatedAt
+        case pendingConfirmationToolCall
+        case pendingConfirmationReason
+        case hasApprovedTerminalAccessForTask
+    }
+
+    init(
+        userGoal: String,
+        recentActionHistoryLines: [String] = [],
+        nextStepNumber: Int = 1,
+        taskCreatedAt: Date = Date(),
+        lastUpdatedAt: Date = Date(),
+        pendingConfirmationToolCall: JarvisToolCall? = nil,
+        pendingConfirmationReason: String? = nil,
+        hasApprovedTerminalAccessForTask: Bool = false
+    ) {
+        self.userGoal = userGoal
+        self.recentActionHistoryLines = recentActionHistoryLines
+        self.nextStepNumber = nextStepNumber
+        self.taskCreatedAt = taskCreatedAt
+        self.lastUpdatedAt = lastUpdatedAt
+        self.pendingConfirmationToolCall = pendingConfirmationToolCall
+        self.pendingConfirmationReason = pendingConfirmationReason
+        self.hasApprovedTerminalAccessForTask = hasApprovedTerminalAccessForTask
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        userGoal = try container.decode(String.self, forKey: .userGoal)
+        recentActionHistoryLines = try container.decode([String].self, forKey: .recentActionHistoryLines)
+        nextStepNumber = try container.decode(Int.self, forKey: .nextStepNumber)
+        taskCreatedAt = try container.decode(Date.self, forKey: .taskCreatedAt)
+        lastUpdatedAt = try container.decode(Date.self, forKey: .lastUpdatedAt)
+        pendingConfirmationToolCall = try container.decodeIfPresent(
+            JarvisToolCall.self,
+            forKey: .pendingConfirmationToolCall
+        )
+        pendingConfirmationReason = try container.decodeIfPresent(
+            String.self,
+            forKey: .pendingConfirmationReason
+        )
+        hasApprovedTerminalAccessForTask = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .hasApprovedTerminalAccessForTask
+        ) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(userGoal, forKey: .userGoal)
+        try container.encode(recentActionHistoryLines, forKey: .recentActionHistoryLines)
+        try container.encode(nextStepNumber, forKey: .nextStepNumber)
+        try container.encode(taskCreatedAt, forKey: .taskCreatedAt)
+        try container.encode(lastUpdatedAt, forKey: .lastUpdatedAt)
+        try container.encodeIfPresent(
+            pendingConfirmationToolCall,
+            forKey: .pendingConfirmationToolCall
+        )
+        try container.encodeIfPresent(
+            pendingConfirmationReason,
+            forKey: .pendingConfirmationReason
+        )
+        try container.encode(
+            hasApprovedTerminalAccessForTask,
+            forKey: .hasApprovedTerminalAccessForTask
+        )
+    }
+}
+
 /// Callbacks the owning manager supplies so it can mirror agent progress into
 /// observable workflow state for the panel UI and the cursor overlay.
 struct JarvisComputerUseAgentCallbacks {
@@ -30,16 +114,22 @@ struct JarvisComputerUseAgentCallbacks {
     let onToolCallStarting: @MainActor (JarvisToolCall, Int) async -> Void
     /// Called after the tool finishes with its result.
     let onToolCallFinished: @MainActor (JarvisToolCall, JarvisToolResult, Int) -> Void
+    /// Persists enough state to continue after an app restart or transient failure.
+    let onCheckpointUpdated: @MainActor (JarvisComputerUseCheckpoint) -> Void
 }
 
 @MainActor
 final class JarvisComputerUseAgent {
-    /// Hard cap on loop iterations so a confused model cannot act forever.
-    static let maximumStepCount = 15
+    /// Long workflows may legitimately take hours. The wall-clock deadline is
+    /// the primary bound; this high action cap remains as a final runaway guard.
+    static let maximumStepCount = 10_000
+    static let maximumRunDurationSeconds: TimeInterval = 24 * 60 * 60
 
     /// Only the most recent history lines are sent back to the model so later
     /// steps do not slow down from an ever-growing prompt.
-    private static let maximumActionHistoryLineCount = 5
+    private static let maximumActionHistoryLineCount = 20
+    private static let maximumScreenCaptureAttemptCount = 4
+    private static let maximumModelRequestAttemptCount = 8
 
     /// The model reports coordinates on this fixed relative grid regardless of
     /// the actual screenshot or display resolution.
@@ -63,39 +153,97 @@ final class JarvisComputerUseAgent {
 
     func run(
         userGoal: String,
+        checkpoint: JarvisComputerUseCheckpoint? = nil,
         callbacks: JarvisComputerUseAgentCallbacks
     ) async -> JarvisComputerUseAgentOutcome {
-        var actionHistoryLines: [String] = []
+        let matchingCheckpoint = checkpoint?.userGoal == userGoal ? checkpoint : nil
+        var actionHistoryLines = matchingCheckpoint?.recentActionHistoryLines ?? []
+        let firstStepNumber = max(matchingCheckpoint?.nextStepNumber ?? 1, 1)
+        let taskCreatedAt = matchingCheckpoint?.taskCreatedAt ?? Date()
+        let hasApprovedTerminalAccessForTask = matchingCheckpoint?
+            .hasApprovedTerminalAccessForTask ?? false
+        let runStartedAt = Date()
+        let processActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .idleSystemSleepDisabled],
+            reason: "Jarvis is completing a user-requested computer workflow."
+        )
+        defer {
+            ProcessInfo.processInfo.endActivity(processActivity)
+        }
         // Loop guard: tracks the last pointer action so the agent can detect
         // when the model keeps choosing the same coordinates without progress.
         var previousPointerActionSignature: String?
         var rejectedRepeatedPointerActionCount = 0
 
-        JarvisDebugLogger.log("Agent", "run started: \"\(userGoal)\"")
+        JarvisDebugLogger.log(
+            "Agent",
+            matchingCheckpoint == nil
+                ? "run started: \"\(userGoal)\""
+                : "run resumed at step \(firstStepNumber): \"\(userGoal)\""
+        )
 
-        for stepNumber in 1...Self.maximumStepCount {
+        func publishCheckpoint(
+            nextStepNumber: Int,
+            pendingConfirmationToolCall: JarvisToolCall? = nil,
+            pendingConfirmationReason: String? = nil
+        ) {
+            let retainedHistoryLines = Array(actionHistoryLines.suffix(100))
+            callbacks.onCheckpointUpdated(JarvisComputerUseCheckpoint(
+                userGoal: userGoal,
+                recentActionHistoryLines: retainedHistoryLines,
+                nextStepNumber: nextStepNumber,
+                taskCreatedAt: taskCreatedAt,
+                lastUpdatedAt: Date(),
+                pendingConfirmationToolCall: pendingConfirmationToolCall,
+                pendingConfirmationReason: pendingConfirmationReason,
+                hasApprovedTerminalAccessForTask: hasApprovedTerminalAccessForTask
+            ))
+        }
+
+        guard firstStepNumber <= Self.maximumStepCount else {
+            return .failed(failureMessage: "I reached the 10,000-action safety limit. The task may be partially done.")
+        }
+
+        for stepNumber in firstStepNumber...Self.maximumStepCount {
             JarvisDebugLogger.logVerbose("Agent", "── step \(stepNumber)/\(Self.maximumStepCount) ──")
+            publishCheckpoint(nextStepNumber: stepNumber)
+
+            if Date().timeIntervalSince(runStartedAt) >= Self.maximumRunDurationSeconds {
+                JarvisDebugLogger.log("Agent", "24-hour run deadline reached")
+                return .failed(failureMessage: "I paused after working for 24 hours. The task may be partially done.")
+            }
 
             if callbacks.isCancelled() {
                 JarvisDebugLogger.log("Agent", "cancelled before observe")
                 return .stopped
             }
 
-            // 1. Observe: capture the screen the user is working on.
-            let screenCapture: CompanionScreenCapture
+            // 1. Observe: capture every connected screen, with the cursor
+            // screen first so the model has a predictable primary focus.
+            let screenCaptures: [CompanionScreenCapture]
             do {
-                let captures = try await CompanionScreenCaptureUtility.captureCursorScreenAsJPEG()
-                guard let cursorScreenCapture = captures.first(where: { $0.isCursorScreen }) ?? captures.first else {
+                screenCaptures = try await Self.performRetriableOperation(
+                    operationName: "screen capture",
+                    maximumAttemptCount: Self.maximumScreenCaptureAttemptCount,
+                    isCancelled: callbacks.isCancelled,
+                    shouldRetry: { _ in true }
+                ) {
+                    try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+                }
+                guard !screenCaptures.isEmpty else {
                     return .failed(failureMessage: "I could not capture the screen.")
                 }
-                screenCapture = cursorScreenCapture
-                JarvisDebugLogger.logVerbose(
-                    "Agent",
-                    "screenshot: \(screenCapture.screenshotWidthInPixels)x\(screenCapture.screenshotHeightInPixels)px jpeg=\(screenCapture.imageData.count) bytes"
-                )
+                for (screenIndex, screenCapture) in screenCaptures.enumerated() {
+                    JarvisDebugLogger.logVerbose(
+                        "Agent",
+                        "screen \(screenIndex + 1): \(screenCapture.screenshotWidthInPixels)x\(screenCapture.screenshotHeightInPixels)px jpeg=\(screenCapture.imageData.count) bytes cursor=\(screenCapture.isCursorScreen)"
+                    )
+                }
+            } catch is CancellationError {
+                return .stopped
             } catch {
                 JarvisDebugLogger.log("Agent", "screenshot capture FAILED: \(error.localizedDescription)")
-                return .failed(failureMessage: "I could not capture the screen: \(error.localizedDescription)")
+                return .failed(failureMessage: "I paused after repeated screen-capture failures: \(error.localizedDescription)")
             }
 
             if callbacks.isCancelled() {
@@ -105,12 +253,19 @@ final class JarvisComputerUseAgent {
 
             // 2. Think: ask the model for the single next action.
             //
-            // The screenshot is resized to exactly 768x768 pixels before it
-            // is sent so the model's coordinate output maps predictably to
-            // the captured display.
-            let modelScreenshotData = Self.resizeScreenshotToModelGrid(screenCapture.imageData)
-                ?? screenCapture.imageData
-            JarvisDebugLogger.logVerbose("Agent", "model input: \(Int(Self.modelCoordinateGridSize))x\(Int(Self.modelCoordinateGridSize))px")
+            // Every screenshot is resized to exactly 768x768 pixels before it
+            // is sent so the model's per-screen coordinates map predictably.
+            let modelScreenshotDataArray = screenCaptures.map { screenCapture in
+                Self.resizeScreenshotToModelGrid(screenCapture.imageData)
+                    ?? screenCapture.imageData
+            }
+            let screenshotLabels = screenCaptures.enumerated().map { screenIndex, screenCapture in
+                "Screen \(screenIndex + 1) of \(screenCaptures.count). \(screenCapture.isCursorScreen ? "The cursor is currently on this screen." : "This is a connected secondary screen.") Coordinates use this screen's own 768x768 grid."
+            }
+            JarvisDebugLogger.logVerbose(
+                "Agent",
+                "model input: \(screenCaptures.count) screen(s), each \(Int(Self.modelCoordinateGridSize))x\(Int(Self.modelCoordinateGridSize))px"
+            )
 
             let userPrompt = Self.agentTurnPrompt(
                 userGoal: userGoal,
@@ -121,14 +276,24 @@ final class JarvisComputerUseAgent {
 
             let modelResponseText: String
             do {
-                modelResponseText = try await openAIClient.generateComputerUseTurn(
-                    systemPrompt: Self.agentSystemPrompt,
-                    userPrompt: userPrompt,
-                    screenshotBase64: modelScreenshotData.base64EncodedString()
-                )
+                modelResponseText = try await Self.performRetriableOperation(
+                    operationName: "GPT computer-use request",
+                    maximumAttemptCount: Self.maximumModelRequestAttemptCount,
+                    isCancelled: callbacks.isCancelled,
+                    shouldRetry: Self.shouldRetryModelRequest
+                ) {
+                    try await openAIClient.generateComputerUseTurn(
+                        systemPrompt: Self.agentSystemPrompt,
+                        userPrompt: userPrompt,
+                        screenshotBase64Array: modelScreenshotDataArray.map { $0.base64EncodedString() },
+                        screenshotLabels: screenshotLabels
+                    )
+                }
+            } catch is CancellationError {
+                return .stopped
             } catch {
                 JarvisDebugLogger.log("Agent", "model call FAILED: \(error.localizedDescription)")
-                return .failed(failureMessage: "GPT-5.5 is unavailable: \(error.localizedDescription)")
+                return .failed(failureMessage: "I paused after repeated GPT-5.5 failures: \(error.localizedDescription)")
             }
 
             JarvisDebugLogger.logMultiline("Agent", title: "raw model response:", body: modelResponseText)
@@ -136,6 +301,7 @@ final class JarvisComputerUseAgent {
             guard let modelAction = Self.parseModelAction(from: modelResponseText) else {
                 JarvisDebugLogger.log("Agent", "parse FAILED — response was not valid action JSON")
                 actionHistoryLines.append("Step \(stepNumber): your previous response was not a valid action JSON object. Respond with exactly one action.")
+                publishCheckpoint(nextStepNumber: stepNumber + 1)
                 continue
             }
 
@@ -158,15 +324,28 @@ final class JarvisComputerUseAgent {
             case "screenshot":
                 JarvisDebugLogger.logVerbose("Agent", "screenshot action skipped — loop already observes each step")
                 actionHistoryLines.append("Step \(stepNumber): took a fresh screenshot (the attached image is always current — no screenshot action is needed).")
+                publishCheckpoint(nextStepNumber: stepNumber + 1)
                 continue
             default:
                 break
             }
 
             // 4. Map the model action to a concrete tool call.
-            guard let toolCall = Self.toolCall(from: modelAction, screenCapture: screenCapture) else {
+            let requestedScreenNumber = modelAction.screenNumber ?? 1
+            guard requestedScreenNumber >= 1,
+                  requestedScreenNumber <= screenCaptures.count else {
+                actionHistoryLines.append(
+                    "Step \(stepNumber): action '\(modelAction.actionName)' referenced invalid screen \(requestedScreenNumber). Choose a screen_number from 1 through \(screenCaptures.count)."
+                )
+                publishCheckpoint(nextStepNumber: stepNumber + 1)
+                continue
+            }
+            let selectedScreenCapture = screenCaptures[requestedScreenNumber - 1]
+
+            guard let toolCall = Self.toolCall(from: modelAction, screenCapture: selectedScreenCapture) else {
                 JarvisDebugLogger.log("Agent", "tool mapping FAILED for action '\(modelAction.actionName)' — missing required fields")
                 actionHistoryLines.append("Step \(stepNumber): action '\(modelAction.actionName)' was missing required fields or is not supported. Choose a supported action.")
+                publishCheckpoint(nextStepNumber: stepNumber + 1)
                 continue
             }
 
@@ -192,6 +371,7 @@ final class JarvisComputerUseAgent {
                     actionHistoryLines.append(
                         "Step \(stepNumber): REJECTED — you chose the same coordinates as your previous \(modelAction.actionName) and the screen did not change, so that coordinate is WRONG. Do not click there again. Prefer a keyboard route instead (for example: key command+l to focus the address bar, type, then key return), or pick a clearly different point, or terminate with status failure."
                     )
+                    publishCheckpoint(nextStepNumber: stepNumber + 1)
                     continue
                 }
                 // A new coordinate means the model adjusted course, so the
@@ -211,17 +391,34 @@ final class JarvisComputerUseAgent {
                 let quartzY = primaryScreenHeight - globalY
                 JarvisDebugLogger.logVerbose(
                     "Coord",
-                    "grid (\(Int(gridCoordinate.x)), \(Int(gridCoordinate.y))) → AppKit (\(Int(globalX)), \(Int(globalY))) → Quartz (\(Int(globalX)), \(Int(quartzY)))"
+                    "screen \(requestedScreenNumber) grid (\(Int(gridCoordinate.x)), \(Int(gridCoordinate.y))) → AppKit (\(Int(globalX)), \(Int(globalY))) → Quartz (\(Int(globalX)), \(Int(quartzY)))"
                 )
             }
 
             // 5. Safety gate.
             let toolDefinition = toolRegistry.tool(named: toolCall.toolName)?.definition
-            switch safetyPolicy.evaluate(toolCall: toolCall, toolDefinition: toolDefinition) {
+            let safetyDecision: JarvisSafetyDecision
+            if Self.isToolCallCoveredByTaskTerminalApproval(
+                toolCall,
+                hasApprovedTerminalAccessForTask: hasApprovedTerminalAccessForTask
+            ) {
+                safetyDecision = .allow
+            } else {
+                safetyDecision = safetyPolicy.evaluate(
+                    toolCall: toolCall,
+                    toolDefinition: toolDefinition
+                )
+            }
+            switch safetyDecision {
             case .allow:
                 break
             case .requireConfirmation(let reason):
                 JarvisDebugLogger.log("Agent", "needs confirmation: \(reason)")
+                publishCheckpoint(
+                    nextStepNumber: stepNumber,
+                    pendingConfirmationToolCall: toolCall,
+                    pendingConfirmationReason: reason
+                )
                 return .needsConfirmation(toolCall, reason: reason)
             case .block(let reason):
                 JarvisDebugLogger.log("Agent", "blocked: \(reason)")
@@ -234,6 +431,14 @@ final class JarvisComputerUseAgent {
             }
 
             // 6. Act.
+            let inFlightHistoryLineIndex = actionHistoryLines.count
+            actionHistoryLines.append(
+                "Step \(stepNumber): STARTED \(toolCall.userVisibleSummary). If this task was resumed after interruption, completion is uncertain; inspect the current screen or state before repeating the action."
+            )
+            // Persist before execution. A restart will advance to a fresh
+            // observation instead of blindly replaying a possibly completed
+            // click, submission, or other side effect.
+            publishCheckpoint(nextStepNumber: stepNumber + 1)
             await callbacks.onToolCallStarting(toolCall, stepNumber)
 
             if callbacks.isCancelled() {
@@ -254,10 +459,14 @@ final class JarvisComputerUseAgent {
             // exactly where it acted and choose different coordinates if the
             // screen did not change as expected.
             let gridCoordinateSuffix = modelAction.coordinate.map { gridCoordinate in
-                " at (\(Int(gridCoordinate.x)), \(Int(gridCoordinate.y)))"
+                " on screen \(requestedScreenNumber) at (\(Int(gridCoordinate.x)), \(Int(gridCoordinate.y)))"
             } ?? ""
-            let historyLine = "Step \(stepNumber): \(toolCall.userVisibleSummary)\(gridCoordinateSuffix) → \(result.message) (\(result.ok ? "executed" : "FAILED"))"
-            actionHistoryLines.append(historyLine)
+            let historyResultMessage = result.message.count > 2_000
+                ? String(result.message.prefix(1_997)) + "..."
+                : result.message
+            let historyLine = "Step \(stepNumber): \(toolCall.userVisibleSummary)\(gridCoordinateSuffix) → \(historyResultMessage) (\(result.ok ? "executed" : "FAILED"))"
+            actionHistoryLines[inFlightHistoryLineIndex] = historyLine
+            publishCheckpoint(nextStepNumber: stepNumber + 1)
 
             // A failed action does not end the run — the model sees the failure
             // in its history plus a fresh screenshot and can try another way.
@@ -268,12 +477,100 @@ final class JarvisComputerUseAgent {
         }
 
         JarvisDebugLogger.log("Agent", "max steps reached without finishing")
-        return .failed(failureMessage: "I stopped after \(Self.maximumStepCount) steps without finishing. The task may be partially done.")
+        return .failed(failureMessage: "I stopped after \(Self.maximumStepCount) actions without finishing. The task may be partially done.")
+    }
+
+    /// Retries only the observation or reasoning operation. Tool execution is
+    /// intentionally outside this helper so a click, form submission, or
+    /// terminal command is never replayed merely because its result was lost.
+    static func performRetriableOperation<OperationResult>(
+        operationName: String,
+        maximumAttemptCount: Int,
+        isCancelled: @MainActor () -> Bool,
+        shouldRetry: (Error) -> Bool,
+        retryDelayNanosecondsProvider: ((Int) -> UInt64)? = nil,
+        operation: () async throws -> OperationResult
+    ) async throws -> OperationResult {
+        guard maximumAttemptCount > 0 else {
+            throw NSError(
+                domain: "JarvisComputerUseAgent",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "\(operationName) requires at least one attempt."]
+            )
+        }
+        var mostRecentError: Error?
+
+        for attemptNumber in 1...maximumAttemptCount {
+            guard !Task.isCancelled, !isCancelled() else {
+                throw CancellationError()
+            }
+
+            do {
+                return try await operation()
+            } catch {
+                guard !(error is CancellationError),
+                      !Task.isCancelled,
+                      !isCancelled() else {
+                    throw CancellationError()
+                }
+
+                mostRecentError = error
+                guard attemptNumber < maximumAttemptCount,
+                      shouldRetry(error) else {
+                    throw error
+                }
+
+                let retryDelaySeconds = min(1 << (attemptNumber - 1), 30)
+                let retryDelayNanoseconds = retryDelayNanosecondsProvider?(attemptNumber)
+                    ?? UInt64(retryDelaySeconds) * 1_000_000_000
+                JarvisDebugLogger.log(
+                    "Agent",
+                    "\(operationName) attempt \(attemptNumber)/\(maximumAttemptCount) failed: \(error.localizedDescription). Retrying in \(retryDelaySeconds)s."
+                )
+                try await Task.sleep(nanoseconds: retryDelayNanoseconds)
+            }
+        }
+
+        throw mostRecentError ?? NSError(
+            domain: "JarvisComputerUseAgent",
+            code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "\(operationName) failed without an error."]
+        )
+    }
+
+    static func shouldRetryModelRequest(_ error: Error) -> Bool {
+        if let openAIError = error as? JarvisOpenAIClientError {
+            switch openAIError {
+            case .invalidProxyURL:
+                return false
+            case .httpError(let statusCode, _):
+                return statusCode == 408
+                    || statusCode == 409
+                    || statusCode == 429
+                    || (500...599).contains(statusCode)
+            case .invalidResponse, .emptyResponse:
+                return true
+            }
+        }
+
+        let urlError = error as NSError
+        if urlError.domain == NSURLErrorDomain {
+            return urlError.code != NSURLErrorCancelled
+        }
+        return true
+    }
+
+    static func isToolCallCoveredByTaskTerminalApproval(
+        _ toolCall: JarvisToolCall,
+        hasApprovedTerminalAccessForTask: Bool
+    ) -> Bool {
+        hasApprovedTerminalAccessForTask && toolCall.toolName == "run_terminal_command"
     }
 
     private static func logParsedModelAction(_ modelAction: JarvisComputerUseModelAction, stepNumber: Int) {
         var details: [String] = ["action=\(modelAction.actionName)"]
         if let reasoning = modelAction.reasoning { details.append("reasoning=\"\(reasoning)\"") }
+        if let screenNumber = modelAction.screenNumber { details.append("screen=\(screenNumber)") }
         if let coordinate = modelAction.coordinate { details.append("coordinate=(\(Int(coordinate.x)), \(Int(coordinate.y)))") }
         if let startCoordinate = modelAction.startCoordinate { details.append("start=(\(Int(startCoordinate.x)), \(Int(startCoordinate.y)))") }
         if let label = modelAction.label { details.append("label=\"\(label)\"") }
@@ -291,27 +588,31 @@ final class JarvisComputerUseAgent {
 
     private static let agentSystemPrompt = """
     You are Jarvis, a computer-use agent controlling a macOS computer with a mouse and keyboard.
-    Each turn you receive: the user's goal, the history of actions already taken, and a screenshot of the CURRENT screen.
-    The screenshot is exactly 768x768 pixels and the screen's resolution is 768x768. All coordinates you output are pixel coordinates in this 768x768 image, with the origin at the top-left corner; x increases rightward and y increases downward.
+    Each turn you receive: the user's goal, the history of actions already taken, and labeled screenshots of every connected screen. Screen 1 is always the display currently containing the cursor.
+    Every screenshot is exactly 768x768 pixels. For coordinate actions, provide screen_number and coordinates in that screen's own 768x768 image, with the origin at the top-left corner; x increases rightward and y increases downward.
 
     Respond with EXACTLY ONE JSON object describing the single next action. No markdown, no extra text.
 
     Supported actions:
-    {"reasoning": "...", "action": "left_click", "coordinate": [x, y], "label": "short element name"}
-    {"reasoning": "...", "action": "double_click", "coordinate": [x, y], "label": "short element name"}
-    {"reasoning": "...", "action": "right_click", "coordinate": [x, y], "label": "short element name"}
-    {"reasoning": "...", "action": "move_mouse", "coordinate": [x, y], "label": "short element name"}
-    {"reasoning": "...", "action": "left_click_drag", "start_coordinate": [x, y], "coordinate": [x, y], "label": "what is being dragged"}
-    {"reasoning": "...", "action": "scroll", "coordinate": [x, y], "scroll_direction": "up|down|left|right", "scroll_amount": 5}
+    {"reasoning": "...", "action": "left_click", "screen_number": 1, "coordinate": [x, y], "label": "short element name"}
+    {"reasoning": "...", "action": "confirm_click", "screen_number": 1, "coordinate": [x, y], "label": "exact consequential action, recipient, and amount when relevant"}
+    {"reasoning": "...", "action": "double_click", "screen_number": 1, "coordinate": [x, y], "label": "short element name"}
+    {"reasoning": "...", "action": "right_click", "screen_number": 1, "coordinate": [x, y], "label": "short element name"}
+    {"reasoning": "...", "action": "move_mouse", "screen_number": 1, "coordinate": [x, y], "label": "short element name"}
+    {"reasoning": "...", "action": "left_click_drag", "screen_number": 1, "start_coordinate": [x, y], "coordinate": [x, y], "label": "what is being dragged"}
+    {"reasoning": "...", "action": "scroll", "screen_number": 1, "coordinate": [x, y], "scroll_direction": "up|down|left|right", "scroll_amount": 5}
     {"reasoning": "...", "action": "type", "text": "text to type into the focused field"}
     {"reasoning": "...", "action": "key", "keys": ["command", "t"]}
+    {"reasoning": "...", "action": "confirm_key", "keys": ["command", "return"], "label": "exact consequential action, recipient, and amount when relevant"}
     {"reasoning": "...", "action": "open_app", "app_name": "Google Chrome"}
+    {"reasoning": "...", "action": "run_terminal_command", "command": "exact shell command", "working_directory": "/absolute/path"}
     {"reasoning": "...", "action": "wait", "seconds": 2}
     {"reasoning": "...", "action": "answer", "text": "spoken answer to the user's question"}
     {"reasoning": "...", "action": "terminate", "status": "success|failure", "message": "short summary of what happened"}
 
     Rules:
     - ONE action per turn. After it executes you will receive a fresh screenshot.
+    - For every click, drag, move, or scroll action, set screen_number to the labeled screen containing the target. Coordinates are local to that screen. Screen 1 is only the default when the target really is on screen 1.
     - Always check the screenshot to verify your previous action worked before continuing. If the screen did NOT change after a click, your coordinate was wrong — NEVER click the same coordinate again. Pick a clearly different point on the actual target, scroll to reveal it, or use a different approach.
     - Click precisely on the center of the target element.
     - Before typing, make sure the correct field is focused (click it first if needed).
@@ -320,10 +621,13 @@ final class JarvisComputerUseAgent {
     - After typing into any search field or address bar, submit it with key ["return"]. Do not click a suggestion, a magnifying glass, or a "go" button.
     - If a text field already contains text you do not want, first select it all with key ["command", "a"], then type — typing replaces the selection. Typing without selecting APPENDS to what is already there.
     - Use "open_app" to launch or switch to an app instead of clicking through the Dock.
+    - For coding, builds, tests, file operations, or scripts, you may use "run_terminal_command" when a shell command is substantially more reliable than driving a terminal window. Always provide the exact command and an absolute working directory. This action pauses for user confirmation before anything runs. Never propose destructive commands unless the user's goal explicitly requires that exact destructive operation.
+    - You may complete consequential workflows, but the final irreversible action must be explicit. Use "confirm_click" for a final UI control or "confirm_key" for its keyboard equivalent before sending a message or email, submitting a form, publishing a post, deleting data, making a purchase, sharing private information, or changing a system/account setting. The label must state exactly what will happen and include the recipient, destination, amount, or item when relevant so the user can make an informed decision.
+    - Never represent a consequential final action as ordinary "left_click" or "key". Preparatory navigation and editing can use ordinary actions; only the final commit action pauses for confirmation.
     - Use "wait" after actions that trigger loading (opening apps, loading pages).
     - Use "answer" when the user asked a question you can answer from the screen — do not perform machine actions for pure questions.
     - Use "terminate" with status "success" as soon as the goal is complete, with a short summary. Use status "failure" only when you cannot make progress.
-    - Never invent destructive shortcuts. Do not delete files, send messages, or submit purchases.
+    - Never invent destructive shortcuts or broaden the user-authorized action. If the requested consequential action cannot be described precisely for confirmation, terminate with failure.
     """
 
     private static func agentTurnPrompt(
@@ -346,7 +650,7 @@ final class JarvisComputerUseAgent {
         Actions taken so far:
         \(historySection)
 
-        This is step \(stepNumber) of at most \(maximumStepCount). The attached screenshot shows the current screen. Respond with the single next action as one JSON object.
+        This is step \(stepNumber) of at most \(maximumStepCount). The attached labeled screenshots show every connected screen. Respond with the single next action as one JSON object.
         """
     }
 
@@ -358,12 +662,15 @@ final class JarvisComputerUseAgent {
         let reasoning: String?
         let coordinate: CGPoint?
         let startCoordinate: CGPoint?
+        let screenNumber: Int?
         let text: String?
         let keys: [String]?
         let appName: String?
         let scrollDirection: String?
         let scrollAmount: Double?
         let waitSeconds: Double?
+        let terminalCommand: String?
+        let workingDirectory: String?
         let terminateStatus: String?
         let message: String?
         let label: String?
@@ -395,12 +702,15 @@ final class JarvisComputerUseAgent {
             reasoning: json["reasoning"] as? String,
             coordinate: parseCoordinatePair(json["coordinate"]),
             startCoordinate: parseCoordinatePair(json["start_coordinate"]),
+            screenNumber: (json["screen_number"] as? NSNumber)?.intValue,
             text: json["text"] as? String,
             keys: parseKeyList(json["keys"]),
             appName: (json["app_name"] as? String) ?? (json["app"] as? String),
             scrollDirection: (json["scroll_direction"] as? String) ?? (json["direction"] as? String),
             scrollAmount: doubleValue(json["scroll_amount"]) ?? doubleValue(json["amount"]),
             waitSeconds: doubleValue(json["seconds"]) ?? doubleValue(json["time"]),
+            terminalCommand: json["command"] as? String,
+            workingDirectory: (json["working_directory"] as? String) ?? (json["cwd"] as? String),
             terminateStatus: json["status"] as? String,
             message: json["message"] as? String,
             label: json["label"] as? String
@@ -413,6 +723,8 @@ final class JarvisComputerUseAgent {
         switch rawActionName.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) {
         case "left_click", "click", "tap":
             return "left_click"
+        case "confirm_click", "confirmed_click", "consequential_click":
+            return "confirm_click"
         case "double_click", "double-click", "doubleclick":
             return "double_click"
         case "right_click", "right-click", "rightclick", "context_click":
@@ -427,10 +739,14 @@ final class JarvisComputerUseAgent {
             return "type"
         case "key", "hotkey", "press_key", "keypress", "press":
             return "key"
+        case "confirm_key", "confirmed_key", "confirm_hotkey", "consequential_key":
+            return "confirm_key"
         case "open_app", "launch_app", "open":
             return "open_app"
         case "wait", "sleep", "pause":
             return "wait"
+        case "run_terminal_command", "terminal", "shell", "run_command":
+            return "run_terminal_command"
         case "answer", "respond", "reply":
             return "answer"
         case "terminate", "finish", "finished", "done", "complete", "stop", "fail":
@@ -535,7 +851,7 @@ final class JarvisComputerUseAgent {
     /// Scroll and wait are excluded because repeating them is legitimate
     /// (scrolling through a long page, waiting for a slow load).
     private static let pointerToolActionNames: Set<String> = [
-        "left_click", "double_click", "right_click", "move_mouse", "left_click_drag"
+        "left_click", "confirm_click", "double_click", "right_click", "move_mouse", "left_click_drag"
     ]
 
     /// Builds a coarse signature for pointer actions so near-identical repeats
@@ -551,7 +867,7 @@ final class JarvisComputerUseAgent {
         let coordinateBucketSize = 20.0
         let bucketedX = Int((Double(gridCoordinate.x) / coordinateBucketSize).rounded())
         let bucketedY = Int((Double(gridCoordinate.y) / coordinateBucketSize).rounded())
-        return "\(modelAction.actionName)@\(bucketedX),\(bucketedY)"
+        return "screen\(modelAction.screenNumber ?? 1):\(modelAction.actionName)@\(bucketedX),\(bucketedY)"
     }
 
     // MARK: - Coordinate mapping
@@ -593,21 +909,41 @@ final class JarvisComputerUseAgent {
             "display_frame_width": .number(Double(screenCapture.displayFrame.width)),
             "display_frame_height": .number(Double(screenCapture.displayFrame.height))
         ]
-        let label = modelAction.label ?? "the target"
+        let normalizedLabel: String?
+        if let candidateLabel = modelAction.label?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !candidateLabel.isEmpty {
+            normalizedLabel = candidateLabel
+        } else {
+            normalizedLabel = nil
+        }
+        let label = normalizedLabel ?? "the target"
 
         switch modelAction.actionName {
-        case "left_click", "double_click", "right_click", "move_mouse":
+        case "left_click", "confirm_click", "double_click", "right_click", "move_mouse":
             guard let gridCoordinate = modelAction.coordinate else { return nil }
+            let isConfirmedClick = modelAction.actionName == "confirm_click"
+            if isConfirmedClick, normalizedLabel == nil {
+                return nil
+            }
             let globalPoint = globalAppKitPoint(fromGridPoint: gridCoordinate, screenCapture: screenCapture)
             var arguments = displayFrameArguments
             arguments["x"] = .number(Double(globalPoint.x))
             arguments["y"] = .number(Double(globalPoint.y))
             arguments["label"] = .string(label)
 
-            let toolName = modelAction.actionName == "left_click" ? "click_at" : modelAction.actionName
+            let toolName: String
+            if isConfirmedClick {
+                toolName = "confirm_click_at"
+            } else if modelAction.actionName == "left_click" {
+                toolName = "click_at"
+            } else {
+                toolName = modelAction.actionName
+            }
             let verb: String
             switch modelAction.actionName {
             case "left_click": verb = "Click"
+            case "confirm_click": verb = "Approve"
             case "double_click": verb = "Double-click"
             case "right_click": verb = "Right-click"
             default: verb = "Move mouse to"
@@ -660,12 +996,21 @@ final class JarvisComputerUseAgent {
                 userVisibleSummary: "Type text"
             )
 
-        case "key":
+        case "key", "confirm_key":
             guard let keys = modelAction.keys, !keys.isEmpty else { return nil }
+            let isConfirmedKey = modelAction.actionName == "confirm_key"
+            if isConfirmedKey, normalizedLabel == nil {
+                return nil
+            }
             return JarvisToolCall(
-                toolName: "press_hotkey",
-                arguments: ["keys": .stringArray(keys)],
-                userVisibleSummary: "Press \(keys.joined(separator: " + "))"
+                toolName: isConfirmedKey ? "confirm_hotkey" : "press_hotkey",
+                arguments: [
+                    "keys": .stringArray(keys),
+                    "label": .string(normalizedLabel ?? "press \(keys.joined(separator: " + "))")
+                ],
+                userVisibleSummary: isConfirmedKey
+                    ? "Approve \(normalizedLabel ?? "the final keyboard action")"
+                    : "Press \(keys.joined(separator: " + "))"
             )
 
         case "open_app":
@@ -681,6 +1026,27 @@ final class JarvisComputerUseAgent {
                 toolName: "wait",
                 arguments: ["seconds": .number(modelAction.waitSeconds ?? 2)],
                 userVisibleSummary: "Wait for the screen to settle"
+            )
+
+        case "run_terminal_command":
+            guard let command = modelAction.terminalCommand?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !command.isEmpty,
+                  let workingDirectory = modelAction.workingDirectory?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  workingDirectory.hasPrefix("/") else {
+                return nil
+            }
+            let commandSummary = command.count > 80
+                ? String(command.prefix(77)) + "..."
+                : command
+            return JarvisToolCall(
+                toolName: "run_terminal_command",
+                arguments: [
+                    "command": .string(command),
+                    "working_directory": .string(workingDirectory)
+                ],
+                userVisibleSummary: "Run in \(workingDirectory): \(commandSummary)"
             )
 
         default:

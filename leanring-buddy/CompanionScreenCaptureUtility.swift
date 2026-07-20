@@ -74,7 +74,8 @@ enum CompanionScreenCaptureUtility {
             let aContainsCursor = frameA.contains(mouseLocation)
             let bContainsCursor = frameB.contains(mouseLocation)
             if aContainsCursor != bContainsCursor { return aContainsCursor }
-            return false
+            if frameA.minX != frameB.minX { return frameA.minX < frameB.minX }
+            return frameA.minY < frameB.minY
         }
 
         let displaysToCapture: [SCDisplay]

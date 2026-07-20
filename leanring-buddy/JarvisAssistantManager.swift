@@ -11,9 +11,30 @@
 import Combine
 import Foundation
 
+private enum JarvisComputerUseCheckpointStore {
+    private static let userDefaultsKey = "JarvisComputerUseCheckpoint.v1"
+
+    static func load() -> JarvisComputerUseCheckpoint? {
+        guard let checkpointData = UserDefaults.standard.data(forKey: userDefaultsKey) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(JarvisComputerUseCheckpoint.self, from: checkpointData)
+    }
+
+    static func save(_ checkpoint: JarvisComputerUseCheckpoint) {
+        guard let checkpointData = try? JSONEncoder().encode(checkpoint) else { return }
+        UserDefaults.standard.set(checkpointData, forKey: userDefaultsKey)
+    }
+
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: userDefaultsKey)
+    }
+}
+
 enum JarvisAssistantState: Equatable {
     case idle
     case planning
+    case paused(userGoal: String, nextStepNumber: Int)
     case waitingForConfirmation(JarvisToolCall, reason: String)
     case executing(currentStep: Int, totalSteps: Int, summary: String)
     case completed(String)
@@ -28,6 +49,7 @@ final class JarvisAssistantManager: ObservableObject {
     @Published private(set) var lastPlan: JarvisPlan?
     @Published private(set) var lastToolResults: [JarvisToolResult] = []
     @Published private(set) var currentWorkflow: JarvisWorkflowState?
+    @Published private(set) var resumableCheckpoint: JarvisComputerUseCheckpoint? = nil
 
     let toolRegistry: JarvisToolRegistry
     let safetyPolicy: JarvisSafetyPolicy
@@ -35,6 +57,8 @@ final class JarvisAssistantManager: ObservableObject {
     private let computerUseAgent: JarvisComputerUseAgent
     private let toolVisualizationProvider: ToolVisualizationProvider?
     private var activeWorkflowID: UUID?
+    private var isConfirmedActionExecuting = false
+    private var activeCommandRequestIdentifier: UUID?
 
     init(
         toolVisualizationProvider: ToolVisualizationProvider? = nil
@@ -49,6 +73,7 @@ final class JarvisAssistantManager: ObservableObject {
             safetyPolicy: safetyPolicy
         )
         self.toolVisualizationProvider = toolVisualizationProvider
+        restoreSavedCheckpointState()
     }
 
     init(
@@ -64,6 +89,7 @@ final class JarvisAssistantManager: ObservableObject {
             safetyPolicy: safetyPolicy
         )
         self.toolVisualizationProvider = toolVisualizationProvider
+        restoreSavedCheckpointState()
     }
 
     @discardableResult
@@ -72,6 +98,20 @@ final class JarvisAssistantManager: ObservableObject {
         guard !trimmedUserCommand.isEmpty else {
             return "Jarvis needs a command before it can act."
         }
+        guard activeCommandRequestIdentifier == nil,
+              activeWorkflowID == nil,
+              !isConfirmedActionExecuting else {
+            return "Jarvis is already running a task. Ask a question, or say Jarvis stop before starting another task."
+        }
+        let commandRequestIdentifier = UUID()
+        activeCommandRequestIdentifier = commandRequestIdentifier
+        defer {
+            if activeCommandRequestIdentifier == commandRequestIdentifier {
+                activeCommandRequestIdentifier = nil
+            }
+        }
+
+        clearSavedCheckpoint()
 
         state = .planning
         lastPlan = nil
@@ -118,6 +158,127 @@ final class JarvisAssistantManager: ObservableObject {
     func stop() {
         JarvisDebugLogger.log("Manager", "stop() — cancelling active workflow")
         activeWorkflowID = nil
+        activeCommandRequestIdentifier = nil
+        clearSavedCheckpoint()
+        state = .idle
+        lastPlan = nil
+        lastToolResults = []
+        currentWorkflow = nil
+    }
+
+    @discardableResult
+    func resumeSavedTask() async -> String {
+        guard activeWorkflowID == nil, !isConfirmedActionExecuting else {
+            return "Jarvis is already running a task."
+        }
+        guard let resumableCheckpoint else {
+            state = .idle
+            return "There is no saved Jarvis task to resume."
+        }
+
+        if let pendingToolCall = resumableCheckpoint.pendingConfirmationToolCall {
+            let confirmationReason = resumableCheckpoint.pendingConfirmationReason
+                ?? "This action needs confirmation before Jarvis can continue."
+            state = .waitingForConfirmation(pendingToolCall, reason: confirmationReason)
+            return "Confirmation required for \(pendingToolCall.userVisibleSummary). \(confirmationReason)"
+        }
+
+        state = .planning
+        lastPlan = nil
+        lastToolResults = []
+        currentWorkflow = nil
+        return await runComputerUseAgentLoop(
+            for: resumableCheckpoint.userGoal,
+            checkpoint: resumableCheckpoint
+        )
+    }
+
+    @discardableResult
+    func confirmPendingActionAndResume() async -> String {
+        return await executePendingActionAndResume(shouldApproveTerminalAccessForTask: false)
+    }
+
+    @discardableResult
+    func approveTerminalAccessForTaskAndResume() async -> String {
+        return await executePendingActionAndResume(shouldApproveTerminalAccessForTask: true)
+    }
+
+    private func executePendingActionAndResume(
+        shouldApproveTerminalAccessForTask: Bool
+    ) async -> String {
+        guard activeWorkflowID == nil, !isConfirmedActionExecuting else {
+            return "Jarvis is already running a task."
+        }
+        guard var checkpoint = resumableCheckpoint,
+              let pendingToolCall = checkpoint.pendingConfirmationToolCall else {
+            return await resumeSavedTask()
+        }
+        if shouldApproveTerminalAccessForTask,
+           pendingToolCall.toolName != "run_terminal_command" {
+            return "Task-wide approval is only available for terminal work."
+        }
+
+        guard let tool = toolRegistry.tool(named: pendingToolCall.toolName) else {
+            let failureMessage = "Tool not registered: \(pendingToolCall.toolName)."
+            state = .failed(failureMessage)
+            return failureMessage
+        }
+        isConfirmedActionExecuting = true
+
+        if shouldApproveTerminalAccessForTask {
+            checkpoint.hasApprovedTerminalAccessForTask = true
+        }
+
+        let confirmedStepNumber = checkpoint.nextStepNumber
+        checkpoint.recentActionHistoryLines.append(
+            "Step \(confirmedStepNumber): STARTED user-confirmed \(pendingToolCall.userVisibleSummary). If this task was resumed after interruption, completion is uncertain; inspect current state before repeating it."
+        )
+        checkpoint.recentActionHistoryLines = Array(checkpoint.recentActionHistoryLines.suffix(100))
+        let inFlightHistoryLineIndex = checkpoint.recentActionHistoryLines.count - 1
+        checkpoint.nextStepNumber = confirmedStepNumber + 1
+        checkpoint.lastUpdatedAt = Date()
+        checkpoint.pendingConfirmationToolCall = nil
+        checkpoint.pendingConfirmationReason = nil
+        saveCheckpoint(checkpoint)
+
+        state = .executing(
+            currentStep: confirmedStepNumber,
+            totalSteps: JarvisComputerUseAgent.maximumStepCount,
+            summary: pendingToolCall.userVisibleSummary
+        )
+        await toolVisualizationProvider?(pendingToolCall)
+        let result = await tool.execute(
+            arguments: pendingToolCall.arguments,
+            context: JarvisToolExecutionContext(
+                originalUserCommand: checkpoint.userGoal,
+                isDryRun: false
+            )
+        )
+        isConfirmedActionExecuting = false
+
+        let historyResultMessage = result.message.count > 2_000
+            ? String(result.message.prefix(1_997)) + "..."
+            : result.message
+        checkpoint.recentActionHistoryLines[inFlightHistoryLineIndex] =
+            "Step \(confirmedStepNumber): user confirmed \(pendingToolCall.userVisibleSummary)\(shouldApproveTerminalAccessForTask ? " and approved terminal access for this task" : "") → \(historyResultMessage) (\(result.ok ? "executed" : "FAILED"))"
+        checkpoint.lastUpdatedAt = Date()
+        saveCheckpoint(checkpoint)
+
+        lastToolResults = [result]
+        guard !Task.isCancelled else {
+            return "Stopped."
+        }
+        return await runComputerUseAgentLoop(
+            for: checkpoint.userGoal,
+            checkpoint: checkpoint
+        )
+    }
+
+    func discardSavedTask() {
+        JarvisDebugLogger.log("Manager", "discarding saved task")
+        activeWorkflowID = nil
+        activeCommandRequestIdentifier = nil
+        clearSavedCheckpoint()
         state = .idle
         lastPlan = nil
         lastToolResults = []
@@ -126,7 +287,10 @@ final class JarvisAssistantManager: ObservableObject {
 
     // MARK: - Computer-use agent loop
 
-    private func runComputerUseAgentLoop(for userGoal: String) async -> String {
+    private func runComputerUseAgentLoop(
+        for userGoal: String,
+        checkpoint: JarvisComputerUseCheckpoint? = nil
+    ) async -> String {
         let workflow = JarvisWorkflowState(userCommand: userGoal, toolCalls: [])
         let workflowID = workflow.id
         activeWorkflowID = workflowID
@@ -140,7 +304,13 @@ final class JarvisAssistantManager: ObservableObject {
             },
             onToolCallStarting: { [weak self] toolCall, stepNumber in
                 guard let self, var updatedWorkflow = self.currentWorkflow, updatedWorkflow.id == workflowID else { return }
-                var newStep = JarvisWorkflowStep(index: updatedWorkflow.steps.count, toolCall: toolCall)
+                // A day-long task can discover thousands of actions. Keep the
+                // latest rows visible without letting panel rendering or memory
+                // grow with the full run history.
+                if updatedWorkflow.steps.count >= 50 {
+                    updatedWorkflow.steps.removeFirst(updatedWorkflow.steps.count - 49)
+                }
+                var newStep = JarvisWorkflowStep(index: stepNumber - 1, toolCall: toolCall)
                 newStep.status = .running
                 updatedWorkflow.steps.append(newStep)
                 self.currentWorkflow = updatedWorkflow
@@ -159,10 +329,20 @@ final class JarvisAssistantManager: ObservableObject {
                 }
                 self.currentWorkflow = updatedWorkflow
                 self.lastToolResults.append(result)
+                if self.lastToolResults.count > 100 {
+                    self.lastToolResults.removeFirst(self.lastToolResults.count - 100)
+                }
+            },
+            onCheckpointUpdated: { [weak self] checkpoint in
+                self?.saveCheckpoint(checkpoint)
             }
         )
 
-        let outcome = await computerUseAgent.run(userGoal: userGoal, callbacks: callbacks)
+        let outcome = await computerUseAgent.run(
+            userGoal: userGoal,
+            checkpoint: checkpoint,
+            callbacks: callbacks
+        )
 
         // A newer command may have replaced this workflow while the agent ran.
         if activeWorkflowID == workflowID {
@@ -173,10 +353,12 @@ final class JarvisAssistantManager: ObservableObject {
         case .completed(let summaryMessage):
             JarvisDebugLogger.log("Manager", "done: \(summaryMessage)")
             state = .completed(summaryMessage)
+            clearSavedCheckpoint()
             return summaryMessage
         case .answered(let answerText):
             JarvisDebugLogger.log("Manager", "answered: \(answerText)")
             state = .completed(answerText)
+            clearSavedCheckpoint()
             return answerText
         case .failed(let failureMessage):
             JarvisDebugLogger.log("Manager", "failed: \(failureMessage)")
@@ -186,12 +368,40 @@ final class JarvisAssistantManager: ObservableObject {
             JarvisDebugLogger.log("Manager", "needs confirmation: \(reason)")
             JarvisDebugLogger.logToolArguments("Manager", toolName: toolCall.toolName, arguments: toolCall.arguments)
             state = .waitingForConfirmation(toolCall, reason: reason)
-            return "That needs confirmation first: \(reason)"
+            return "Confirmation required for \(toolCall.userVisibleSummary). \(reason)"
         case .stopped:
             JarvisDebugLogger.logVerbose("Manager", "stopped")
             state = .idle
             return "Stopped."
         }
+    }
+
+    private func restoreSavedCheckpointState() {
+        guard let savedCheckpoint = JarvisComputerUseCheckpointStore.load() else { return }
+        resumableCheckpoint = savedCheckpoint
+
+        if let pendingToolCall = savedCheckpoint.pendingConfirmationToolCall {
+            state = .waitingForConfirmation(
+                pendingToolCall,
+                reason: savedCheckpoint.pendingConfirmationReason
+                    ?? "This action needs confirmation before Jarvis can continue."
+            )
+        } else {
+            state = .paused(
+                userGoal: savedCheckpoint.userGoal,
+                nextStepNumber: savedCheckpoint.nextStepNumber
+            )
+        }
+    }
+
+    private func saveCheckpoint(_ checkpoint: JarvisComputerUseCheckpoint) {
+        JarvisComputerUseCheckpointStore.save(checkpoint)
+        resumableCheckpoint = checkpoint
+    }
+
+    private func clearSavedCheckpoint() {
+        JarvisComputerUseCheckpointStore.clear()
+        resumableCheckpoint = nil
     }
 
     // MARK: - Rule-based fast path execution
@@ -237,7 +447,7 @@ final class JarvisAssistantManager: ObservableObject {
                 workflow.steps[stepIndex].status = .pending
                 currentWorkflow = workflow
                 state = .waitingForConfirmation(toolCall, reason: reason)
-                return "That needs confirmation first: \(reason)"
+                return "Confirmation required for \(toolCall.userVisibleSummary). \(reason)"
             case .block(let reason):
                 let failureResult = JarvisToolResult.failure(reason)
                 executionResults.append(failureResult)

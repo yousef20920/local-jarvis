@@ -34,6 +34,14 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var sparkleUpdaterController: SPUStandardUpdaterController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Hosted unit tests launch the app executable to load its Swift
+        // module. Do not start microphone, screen-capture, analytics, login
+        // item, or menu-bar side effects in that test-host process.
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+            print("🎯 Clicky: Unit-test host — runtime services skipped")
+            return
+        }
+
         print("🎯 Clicky: Starting...")
         print("🎯 Clicky: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
 
