@@ -12,6 +12,7 @@ import Foundation
 enum JarvisVoiceIntentRoute: String {
     case action
     case vision
+    case webResearch = "web_research"
     case actionThenVision = "action_then_vision"
 }
 
@@ -49,11 +50,9 @@ final class JarvisVoiceIntentRouter {
             JarvisDebugLogger.log("Route", "\(decision.route.rawValue) — \(decision.reason)")
             return decision
         } catch {
-            JarvisDebugLogger.log("Route", "router unavailable: \(error.localizedDescription) — defaulting to vision")
-            return JarvisVoiceIntentDecision(
-                route: .vision,
-                actionCommand: trimmedTranscript,
-                visionPrompt: trimmedTranscript,
+            JarvisDebugLogger.log("Route", "router unavailable: \(error.localizedDescription) — using deterministic fallback")
+            return Self.fallbackDecision(
+                for: trimmedTranscript,
                 reason: "router unavailable"
             )
         }
@@ -75,22 +74,23 @@ final class JarvisVoiceIntentRouter {
 
         Routes:
         action = control the Mac: open, search, google, look up, navigate, type, press, click, tap, scroll.
-        vision = answer/explain/opine/describe current screen without controlling the Mac.
+        vision = answer a question specifically about what is visible on the current screen.
+        web_research = answer any informational, factual, explanatory, recommendation, opinion, or current-events question using internet sources.
         action_then_vision = do a Mac action first, then answer after it completes.
 
         Rules:
-        Direct questions normally stay vision: facts, opinions, explanations, and "what is/what's/how/why/when/where/do you see" questions.
-        Direct questions that require current/live information are action_then_vision: weather, current time in a city, prices, news, stocks, sports, exchange rates. Use action_command "search for <short query>" and vision_prompt as the user's original question.
-        Do not convert a non-live direct question into a Mac action or browser search.
+        Route every informational question to web_research, even when it is not time-sensitive. Jarvis must ground answers in internet sources instead of model memory.
+        Use vision only when the user is explicitly asking about the visible screen, such as "what do you see", "what does this error say", or "where is the save button".
+        For web_research, action_command is empty and vision_prompt is the user's complete original question.
         If the transcript explicitly commands search/google/look up/open/navigate/type/press/click/tap/scroll, use action.
         Use action_then_vision only when the same transcript explicitly asks for an action and a follow-up answer after it, such as "and tell me", "then explain", or "after that what does it say".
         For action_then_vision, action_command is only the action part; vision_prompt is only the follow-up answer request.
         For action, action_command repeats the transcript exactly.
 
         Examples:
-        what's the weather in Toronto today? -> {"route":"action_then_vision","action_command":"search for Toronto weather today","vision_prompt":"what's the weather in Toronto today?","reason":"live info lookup"}
-        what's the time in San Francisco? -> {"route":"action_then_vision","action_command":"search for time in San Francisco","vision_prompt":"what's the time in San Francisco?","reason":"live info lookup"}
-        what is better, skyscraper grey or dravit grey on a BMW? -> {"route":"vision","action_command":"","vision_prompt":"what is better, skyscraper grey or dravit grey on a BMW?","reason":"opinion"}
+        what's the weather in Toronto today? -> {"route":"web_research","action_command":"","vision_prompt":"what's the weather in Toronto today?","reason":"internet-grounded question"}
+        what's the time in San Francisco? -> {"route":"web_research","action_command":"","vision_prompt":"what's the time in San Francisco?","reason":"internet-grounded question"}
+        what is better, skyscraper grey or dravit grey on a BMW? -> {"route":"web_research","action_command":"","vision_prompt":"what is better, skyscraper grey or dravit grey on a BMW?","reason":"internet-grounded recommendation"}
         search for a Porsche 911 white colour -> {"route":"action","action_command":"search for a Porsche 911 white colour","vision_prompt":"","reason":"search command"}
         search up cat and tell me what it says -> {"route":"action_then_vision","action_command":"search up cat","vision_prompt":"tell me what the current page says about cat","reason":"action plus answer"}
         open chrome and go to youtube.com -> {"route":"action","action_command":"open chrome and go to youtube.com","vision_prompt":"","reason":"control"}
@@ -102,7 +102,7 @@ final class JarvisVoiceIntentRouter {
         """
     }
 
-    private static func parseDecision(
+    static func parseDecision(
         responseText: String,
         fallbackTranscript: String
     ) -> JarvisVoiceIntentDecision {
@@ -123,32 +123,18 @@ final class JarvisVoiceIntentRouter {
 
         let normalizedFallback = fallbackTranscript.lowercased()
         let hasExplicitControlCommand = Self.hasExplicitControlCommand(normalizedFallback)
-        let isLiveInfoQuestion = Self.isLiveInfoQuestion(normalizedFallback)
-        let isDirectQuestion = Self.isDirectQuestion(normalizedFallback)
+        let isInformationalRequest = Self.isInformationalRequest(normalizedFallback)
 
         switch route {
         case .action:
-            if !hasExplicitControlCommand && isDirectQuestion {
-                if isLiveInfoQuestion {
-                    return JarvisVoiceIntentDecision(
-                        route: .actionThenVision,
-                        actionCommand: actionCommand.hasPrefix("search")
-                            ? actionCommand
-                            : "search for \(Self.searchQueryText(from: fallbackTranscript))",
-                        visionPrompt: fallbackTranscript,
-                        reason: reason.isEmpty
-                            ? "live question corrected to search then answer"
-                            : reason + " (live question — corrected to search then answer)"
-                    )
-                }
-
+            if !hasExplicitControlCommand && isInformationalRequest {
                 return JarvisVoiceIntentDecision(
-                    route: .vision,
+                    route: .webResearch,
                     actionCommand: "",
                     visionPrompt: fallbackTranscript,
                     reason: reason.isEmpty
-                        ? "question corrected to vision"
-                        : reason + " (question — corrected to vision)"
+                        ? "question corrected to web research"
+                        : reason + " (question — corrected to web research)"
                 )
             }
 
@@ -159,14 +145,43 @@ final class JarvisVoiceIntentRouter {
                 reason: reason
             )
         case .vision:
+            if isInformationalRequest && !Self.isScreenContextQuestion(normalizedFallback) {
+                return JarvisVoiceIntentDecision(
+                    route: .webResearch,
+                    actionCommand: "",
+                    visionPrompt: fallbackTranscript,
+                    reason: reason.isEmpty
+                        ? "informational question corrected to web research"
+                        : reason + " (informational question — corrected to web research)"
+                )
+            }
+
             return JarvisVoiceIntentDecision(
                 route: .vision,
                 actionCommand: "",
                 visionPrompt: visionPrompt.isEmpty ? fallbackTranscript : visionPrompt,
                 reason: reason
             )
+        case .webResearch:
+            return JarvisVoiceIntentDecision(
+                route: .webResearch,
+                actionCommand: "",
+                visionPrompt: visionPrompt.isEmpty ? fallbackTranscript : visionPrompt,
+                reason: reason
+            )
         case .actionThenVision:
             if actionCommand.isEmpty {
+                if isInformationalRequest && !Self.isScreenContextQuestion(normalizedFallback) {
+                    return JarvisVoiceIntentDecision(
+                        route: .webResearch,
+                        actionCommand: "",
+                        visionPrompt: visionPrompt.isEmpty ? fallbackTranscript : visionPrompt,
+                        reason: reason.isEmpty
+                            ? "question corrected to web research"
+                            : reason + " (no action — corrected to web research)"
+                    )
+                }
+
                 return JarvisVoiceIntentDecision(
                     route: .vision,
                     actionCommand: "",
@@ -177,14 +192,14 @@ final class JarvisVoiceIntentRouter {
                 )
             }
 
-            if !hasExplicitControlCommand && !isLiveInfoQuestion {
+            if !hasExplicitControlCommand {
                 return JarvisVoiceIntentDecision(
-                    route: .vision,
+                    route: .webResearch,
                     actionCommand: "",
                     visionPrompt: visionPrompt.isEmpty ? fallbackTranscript : visionPrompt,
                     reason: reason.isEmpty
-                        ? "non-live question downgraded to vision"
-                        : reason + " (non-live question — downgraded to vision)"
+                        ? "question corrected to web research"
+                        : reason + " (question — corrected to web research)"
                 )
             }
 
@@ -212,23 +227,23 @@ final class JarvisVoiceIntentRouter {
         }
     }
 
-    private static func fallbackDecision(for transcript: String, reason: String) -> JarvisVoiceIntentDecision {
+    static func fallbackDecision(for transcript: String, reason: String) -> JarvisVoiceIntentDecision {
         let normalizedTranscript = transcript.lowercased()
-        if isLiveInfoQuestion(normalizedTranscript) {
-            return JarvisVoiceIntentDecision(
-                route: .actionThenVision,
-                actionCommand: "search for \(searchQueryText(from: transcript))",
-                visionPrompt: transcript,
-                reason: reason + " — live question fallback"
-            )
-        }
-
         if hasExplicitControlCommand(normalizedTranscript) {
             return JarvisVoiceIntentDecision(
                 route: .action,
                 actionCommand: transcript,
                 visionPrompt: "",
                 reason: reason + " — explicit command fallback"
+            )
+        }
+
+        if isInformationalRequest(normalizedTranscript) && !isScreenContextQuestion(normalizedTranscript) {
+            return JarvisVoiceIntentDecision(
+                route: .webResearch,
+                actionCommand: "",
+                visionPrompt: transcript,
+                reason: reason + " — web research fallback"
             )
         }
 
@@ -261,23 +276,39 @@ final class JarvisVoiceIntentRouter {
         return nil
     }
 
-    private static func hasExplicitControlCommand(_ normalizedTranscript: String) -> Bool {
+    static func hasExplicitControlCommand(_ normalizedTranscript: String) -> Bool {
         [
             "open", "search", "google", "look up", "lookup", "navigate",
             "go to", "type", "press", "click", "tap", "scroll"
-        ].contains { normalizedTranscript.contains($0) }
+        ].contains { commandPhrase in
+            let escapedCommandPhrase = NSRegularExpression.escapedPattern(for: commandPhrase)
+            return normalizedTranscript.range(
+                of: #"\b"# + escapedCommandPhrase + #"\b"#,
+                options: .regularExpression
+            ) != nil
+        }
     }
 
-    private static func isLiveInfoQuestion(_ normalizedTranscript: String) -> Bool {
-        [
-            "weather", "current time", "time in", "price", "prices",
-            "stock", "stocks", "news", "score", "scores", "sports",
-            "exchange rate", "currency", "today", "right now"
+    private static func isScreenContextQuestion(_ normalizedTranscript: String) -> Bool {
+        let hasExplicitScreenReference = [
+            "what do you see", "can you see", "do you see", "on my screen",
+            "on the screen", "this screen", "current screen", "this error",
+            "this page", "this window", "this code", "selected text",
+            "highlighted text", "what am i looking at"
         ].contains { normalizedTranscript.contains($0) }
+
+        let asksWhere = normalizedTranscript.hasPrefix("where is")
+            || normalizedTranscript.hasPrefix("where's")
+        let namesVisibleInterfaceElement = [
+            "button", "menu", "icon", "field", "tab", "setting", "option",
+            "toolbar", "sidebar", "window"
+        ].contains { normalizedTranscript.contains($0) }
+
+        return hasExplicitScreenReference || (asksWhere && namesVisibleInterfaceElement)
     }
 
-    private static func isDirectQuestion(_ normalizedTranscript: String) -> Bool {
-        normalizedTranscript.contains("?")
+    static func isInformationalRequest(_ normalizedTranscript: String) -> Bool {
+        let isDirectQuestion = normalizedTranscript.contains("?")
             || normalizedTranscript.hasPrefix("what ")
             || normalizedTranscript.hasPrefix("what's ")
             || normalizedTranscript.hasPrefix("whats ")
@@ -290,11 +321,19 @@ final class JarvisVoiceIntentRouter {
             || normalizedTranscript.hasPrefix("does ")
             || normalizedTranscript.hasPrefix("is ")
             || normalizedTranscript.hasPrefix("are ")
+            || normalizedTranscript.hasPrefix("who ")
+            || normalizedTranscript.hasPrefix("which ")
+            || normalizedTranscript.hasPrefix("tell me ")
+            || normalizedTranscript.hasPrefix("explain ")
+
+        let isInformationSeekingImperative = [
+            "give me information", "give me a summary", "give me the latest",
+            "recommend ", "compare ", "summarize ", "research ", "find out ",
+            "help me understand ", "get me the latest", "latest news",
+            "news about ", "weather in ", "price of "
+        ].contains { normalizedTranscript.hasPrefix($0) }
+
+        return isDirectQuestion || isInformationSeekingImperative
     }
 
-    private static func searchQueryText(from transcript: String) -> String {
-        transcript
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "?.!"))
-    }
 }

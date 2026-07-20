@@ -98,7 +98,7 @@ struct JarvisToolDefinition: Equatable {
     let defaultRequiresConfirmation: Bool
 }
 
-struct JarvisToolCall: Equatable, Identifiable {
+struct JarvisToolCall: Codable, Equatable, Identifiable {
     let id: UUID
     let toolName: String
     let arguments: [String: JarvisToolArgumentValue]

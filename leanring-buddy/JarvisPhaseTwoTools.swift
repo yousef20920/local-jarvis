@@ -17,7 +17,133 @@ enum JarvisPhaseTwoToolInstaller {
         toolRegistry.register(JarvisPressHotkeyTool())
         toolRegistry.register(JarvisTakeScreenshotTool())
         toolRegistry.register(JarvisClickAtTool())
+        toolRegistry.register(JarvisConfirmedClickAtTool())
+        toolRegistry.register(JarvisConfirmedHotkeyTool())
+        toolRegistry.register(JarvisRunTerminalCommandTool())
         JarvisComputerUseToolInstaller.registerTools(in: toolRegistry)
+    }
+}
+
+@MainActor
+struct JarvisRunTerminalCommandTool: JarvisTool {
+    let definition = JarvisToolDefinition(
+        name: "run_terminal_command",
+        summary: "Run one shell command in an explicit working directory after user confirmation.",
+        requiredArgumentNames: ["command", "working_directory"],
+        optionalArgumentNames: [],
+        defaultRequiresConfirmation: true
+    )
+
+    func execute(
+        arguments: [String: JarvisToolArgumentValue],
+        context: JarvisToolExecutionContext
+    ) async -> JarvisToolResult {
+        guard let command = arguments["command"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !command.isEmpty else {
+            return .failure("Jarvis needs a terminal command to run.")
+        }
+
+        guard let workingDirectoryPath = arguments["working_directory"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              (workingDirectoryPath as NSString).isAbsolutePath else {
+            return .failure("Jarvis needs an explicit working directory before running a terminal command.")
+        }
+
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: workingDirectoryPath, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return .failure("The working directory does not exist: \(workingDirectoryPath)")
+        }
+
+        let outputFileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jarvis-command-\(UUID().uuidString).log")
+        guard FileManager.default.createFile(atPath: outputFileURL.path, contents: nil),
+              let outputFileHandle = try? FileHandle(forWritingTo: outputFileURL) else {
+            return .failure("Jarvis could not create temporary command output storage.")
+        }
+        defer {
+            try? outputFileHandle.close()
+            try? FileManager.default.removeItem(at: outputFileURL)
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-lc", command]
+        process.currentDirectoryURL = URL(fileURLWithPath: workingDirectoryPath, isDirectory: true)
+        process.standardOutput = outputFileHandle
+        process.standardError = outputFileHandle
+
+        let processResult: Result<Int32, Error> = await withTaskCancellationHandler {
+            guard !Task.isCancelled else {
+                return .failure(CancellationError())
+            }
+            await withCheckedContinuation { continuation in
+                process.terminationHandler = { completedProcess in
+                    continuation.resume(returning: .success(completedProcess.terminationStatus))
+                }
+                do {
+                    // Install the termination handler before launch so even a
+                    // very short command cannot finish before continuation is wired.
+                    try process.run()
+                } catch {
+                    process.terminationHandler = nil
+                    continuation.resume(returning: .failure(error))
+                }
+            }
+        } onCancel: {
+            if process.isRunning {
+                process.terminate()
+            }
+        }
+
+        guard case .success(let terminationStatus) = processResult else {
+            if case .failure(let error) = processResult {
+                if error is CancellationError {
+                    return .failure("The terminal command was cancelled.")
+                }
+                return .failure("Could not start the terminal command: \(error.localizedDescription)")
+            }
+            return .failure("Could not start the terminal command.")
+        }
+
+        try? outputFileHandle.synchronize()
+        let commandOutput = Self.readOutputTail(from: outputFileURL, maximumByteCount: 16_384)
+        let resultData: [String: JarvisToolArgumentValue] = [
+            "exit_status": .number(Double(terminationStatus)),
+            "output": .string(commandOutput)
+        ]
+        let summarizedCommandOutput = commandOutput.count > 2_000
+            ? "..." + String(commandOutput.suffix(2_000))
+            : commandOutput
+
+        if terminationStatus == 0 {
+            let summary = summarizedCommandOutput.isEmpty
+                ? "Terminal command finished successfully."
+                : "Terminal command finished successfully. Output: \(summarizedCommandOutput)"
+            return .success(summary, data: resultData)
+        }
+
+        let failureSummary = summarizedCommandOutput.isEmpty
+            ? "Terminal command failed with exit status \(terminationStatus)."
+            : "Terminal command failed with exit status \(terminationStatus). Output: \(summarizedCommandOutput)"
+        return .failure(failureSummary, data: resultData)
+    }
+
+    private static func readOutputTail(from outputFileURL: URL, maximumByteCount: UInt64) -> String {
+        guard let outputReadHandle = try? FileHandle(forReadingFrom: outputFileURL) else {
+            return ""
+        }
+        defer { try? outputReadHandle.close() }
+
+        let fileByteCount = (try? outputReadHandle.seekToEnd()) ?? 0
+        let startingOffset = fileByteCount > maximumByteCount
+            ? fileByteCount - maximumByteCount
+            : 0
+        try? outputReadHandle.seek(toOffset: startingOffset)
+        let outputData = (try? outputReadHandle.readToEnd()) ?? Data()
+        return String(decoding: outputData, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -250,6 +376,47 @@ struct JarvisClickAtTool: JarvisTool {
             x: appKitPoint.x,
             y: primaryScreenHeight - appKitPoint.y
         )
+    }
+}
+
+/// Uses the same physical click implementation as an ordinary click, but its
+/// separate tool identity forces the safety policy to pause before a final,
+/// consequential UI action such as Send, Submit, Delete, or Purchase.
+@MainActor
+struct JarvisConfirmedClickAtTool: JarvisTool {
+    let definition = JarvisToolDefinition(
+        name: "confirm_click_at",
+        summary: "Click a consequential UI control after explicit user confirmation.",
+        requiredArgumentNames: ["x", "y", "label"],
+        optionalArgumentNames: ["display_frame_x", "display_frame_y", "display_frame_width", "display_frame_height"],
+        defaultRequiresConfirmation: true
+    )
+
+    func execute(
+        arguments: [String: JarvisToolArgumentValue],
+        context: JarvisToolExecutionContext
+    ) async -> JarvisToolResult {
+        await JarvisClickAtTool().execute(arguments: arguments, context: context)
+    }
+}
+
+/// Keyboard equivalents of final submission buttons need the same semantic
+/// safety boundary; otherwise Command+Return could bypass a confirmed click.
+@MainActor
+struct JarvisConfirmedHotkeyTool: JarvisTool {
+    let definition = JarvisToolDefinition(
+        name: "confirm_hotkey",
+        summary: "Press a consequential keyboard shortcut after explicit user confirmation.",
+        requiredArgumentNames: ["keys", "label"],
+        optionalArgumentNames: [],
+        defaultRequiresConfirmation: true
+    )
+
+    func execute(
+        arguments: [String: JarvisToolArgumentValue],
+        context: JarvisToolExecutionContext
+    ) async -> JarvisToolResult {
+        await JarvisPressHotkeyTool().execute(arguments: arguments, context: context)
     }
 }
 

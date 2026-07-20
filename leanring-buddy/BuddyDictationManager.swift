@@ -207,6 +207,7 @@ enum BuddyDictationPermissionProblem {
 private enum BuddyDictationStartSource {
     case microphoneButton
     case keyboardShortcut
+    case continuousListening
 }
 
 private struct BuddyDictationDraftCallbacks {
@@ -220,9 +221,12 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     private static let recordedAudioPowerHistoryLength = 44
     private static let recordedAudioPowerHistoryBaselineLevel: CGFloat = 0.02
     private static let recordedAudioPowerHistorySampleIntervalSeconds: TimeInterval = 0.07
+    private static let continuousListeningSilenceDurationSeconds: TimeInterval = 1.25
+    private static let continuousListeningVoicePowerThreshold: CGFloat = 0.12
 
     @Published private(set) var isRecordingFromMicrophoneButton = false
     @Published private(set) var isRecordingFromKeyboardShortcut = false
+    @Published private(set) var isRecordingContinuously = false
     @Published private(set) var isKeyboardShortcutSessionActiveOrFinalizing = false
     @Published private(set) var isFinalizingTranscript = false
     @Published private(set) var isPreparingToRecord = false
@@ -237,11 +241,15 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     @Published private(set) var currentPermissionProblem: BuddyDictationPermissionProblem?
 
     var isDictationInProgress: Bool {
-        isPreparingToRecord || isRecordingFromMicrophoneButton || isRecordingFromKeyboardShortcut || isFinalizingTranscript
+        isPreparingToRecord
+            || isRecordingFromMicrophoneButton
+            || isRecordingFromKeyboardShortcut
+            || isRecordingContinuously
+            || isFinalizingTranscript
     }
 
     var isActivelyRecordingAudio: Bool {
-        isRecordingFromMicrophoneButton || isRecordingFromKeyboardShortcut
+        isRecordingFromMicrophoneButton || isRecordingFromKeyboardShortcut || isRecordingContinuously
     }
 
     var isMicrophoneButtonActivelyRecordingAudio: Bool {
@@ -276,6 +284,8 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     private var contextualKeyterms: [String] = []
     private var lastRecordedAudioPowerSampleDate = Date.distantPast
     private var activePermissionRequestTask: Task<Bool, Never>?
+    private var continuousListeningSilenceMonitoringTask: Task<Void, Never>?
+    private var continuousListeningLastVoiceActivityDate: Date?
     /// Timestamp of the last completed permission request, used to debounce
     /// rapid follow-up requests that arrive before macOS updates its cache.
     private var lastPermissionRequestCompletedAt: Date?
@@ -321,12 +331,29 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         )
     }
 
+    func startContinuousListening(
+        submitTranscript: @escaping (String) -> Void
+    ) async {
+        await startPushToTalk(
+            startSource: .continuousListening,
+            currentDraftText: "",
+            updateDraftText: { _ in },
+            submitDraftText: submitTranscript,
+            shouldAutomaticallySubmitFinalDraftOnStop: true
+        )
+    }
+
     func stopPersistentDictationFromMicrophoneButton() {
         stopPushToTalk(expectedStartSource: .microphoneButton)
     }
 
     func stopPushToTalkFromKeyboardShortcut() {
         stopPushToTalk(expectedStartSource: .keyboardShortcut)
+    }
+
+    func stopContinuousListening() {
+        guard activeStartSource == .continuousListening else { return }
+        cancelCurrentDictation(preserveDraftText: false)
     }
 
     func cancelCurrentDictation(preserveDraftText: Bool = true) {
@@ -432,6 +459,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         isFinalizingTranscript = false
         isRecordingFromMicrophoneButton = startSource == .microphoneButton
         isRecordingFromKeyboardShortcut = startSource == .keyboardShortcut
+        isRecordingContinuously = startSource == .continuousListening
         isKeyboardShortcutSessionActiveOrFinalizing = startSource == .keyboardShortcut
         currentAudioPowerLevel = 0
         recordedAudioPowerHistory = Array(
@@ -459,6 +487,9 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             }
             if startSource == .microphoneButton {
                 microphoneButtonRecordingStartedAt = Date()
+            }
+            if startSource == .continuousListening {
+                startContinuousListeningSilenceMonitoring()
             }
             isPreparingToRecord = false
             print("🎙️ BuddyDictationManager: recognition session started")
@@ -521,7 +552,12 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             keyterms: buildTranscriptionKeyterms(),
             onTranscriptUpdate: { [weak self] transcriptText in
                 Task { @MainActor in
-                    self?.latestRecognizedText = transcriptText
+                    guard let self else { return }
+                    self.latestRecognizedText = transcriptText
+                    if self.activeStartSource == .continuousListening,
+                       !transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        self.continuousListeningLastVoiceActivityDate = Date()
+                    }
                 }
             },
             onFinalTranscriptReady: { [weak self] transcriptText in
@@ -533,6 +569,12 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                         self.finishCurrentDictationSessionIfNeeded(
                             shouldSubmitFinalDraft: self.shouldAutomaticallySubmitFinalDraft
                         )
+                    } else if self.activeStartSource == .continuousListening {
+                        // Apple Speech can finalize an utterance before the
+                        // local silence timer fires. Treat that as the same
+                        // end-of-speech signal and submit it immediately.
+                        self.stopPushToTalk(expectedStartSource: .continuousListening)
+                        self.finishCurrentDictationSessionIfNeeded(shouldSubmitFinalDraft: true)
                     }
                 }
             },
@@ -627,6 +669,9 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     }
 
     private func resetSessionState() {
+        continuousListeningSilenceMonitoringTask?.cancel()
+        continuousListeningSilenceMonitoringTask = nil
+        continuousListeningLastVoiceActivityDate = nil
         pendingStartRequestIdentifier = UUID()
         activeTranscriptionSession = nil
         draftCallbacks = nil
@@ -638,6 +683,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         isPreparingToRecord = false
         isRecordingFromMicrophoneButton = false
         isRecordingFromKeyboardShortcut = false
+        isRecordingContinuously = false
         isKeyboardShortcutSessionActiveOrFinalizing = false
         isFinalizingTranscript = false
         currentAudioPowerLevel = 0
@@ -708,6 +754,11 @@ final class BuddyDictationManager: NSObject, ObservableObject {
             )
             self.currentAudioPowerLevel = smoothedAudioPowerLevel
 
+            if self.activeStartSource == .continuousListening,
+               CGFloat(boostedLevel) >= Self.continuousListeningVoicePowerThreshold {
+                self.continuousListeningLastVoiceActivityDate = Date()
+            }
+
             let now = Date()
             if now.timeIntervalSince(self.lastRecordedAudioPowerSampleDate)
                 >= Self.recordedAudioPowerHistorySampleIntervalSeconds {
@@ -715,6 +766,36 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 self.appendRecordedAudioPowerSample(
                     max(CGFloat(boostedLevel), Self.recordedAudioPowerHistoryBaselineLevel)
                 )
+            }
+        }
+    }
+
+    private func startContinuousListeningSilenceMonitoring() {
+        continuousListeningSilenceMonitoringTask?.cancel()
+        continuousListeningLastVoiceActivityDate = nil
+
+        continuousListeningSilenceMonitoringTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled, let self else { return }
+                guard self.activeStartSource == .continuousListening,
+                      self.isRecordingContinuously,
+                      !self.isFinalizingTranscript else {
+                    return
+                }
+
+                let hasRecognizedSpeech = !self.latestRecognizedText
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty
+                guard hasRecognizedSpeech,
+                      let lastVoiceActivityDate = self.continuousListeningLastVoiceActivityDate,
+                      Date().timeIntervalSince(lastVoiceActivityDate)
+                        >= Self.continuousListeningSilenceDurationSeconds else {
+                    continue
+                }
+
+                self.stopPushToTalk(expectedStartSource: .continuousListening)
+                return
             }
         }
     }

@@ -22,6 +22,8 @@ struct JarvisSafetyPolicy {
         "send_message",
         "submit_form",
         "purchase",
+        "confirm_click_at",
+        "confirm_hotkey",
         "run_terminal_command",
         "install_software",
         "change_system_setting",

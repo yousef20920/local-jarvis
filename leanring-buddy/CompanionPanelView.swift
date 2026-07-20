@@ -40,10 +40,24 @@ struct CompanionPanelView: View {
                     .padding(.horizontal, 16)
 
                 Spacer()
+                    .frame(height: 12)
+
+                alwaysListeningToggleRow
+                    .padding(.horizontal, 16)
+
+                Spacer()
                     .frame(height: 16)
 
                 jarvisCommandSection
                     .padding(.horizontal, 16)
+
+                if !companionManager.lastInternetSources.isEmpty {
+                    Spacer()
+                        .frame(height: 12)
+
+                    internetSourcesSection
+                        .padding(.horizontal, 16)
+                }
             }
 
             if !companionManager.allPermissionsGranted {
@@ -155,6 +169,20 @@ struct CompanionPanelView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            if jarvisAssistantManager.resumableCheckpoint != nil {
+                if jarvisAssistantManager.resumableCheckpoint?
+                    .hasApprovedTerminalAccessForTask == true {
+                    HStack(spacing: 5) {
+                        Image(systemName: "terminal.fill")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text("TERMINAL APPROVED FOR THIS TASK")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    }
+                    .foregroundColor(DS.Colors.warning)
+                }
+                savedTaskControls
+            }
+
             if let workflow = jarvisAssistantManager.currentWorkflow, !workflow.steps.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(workflow.steps) { workflowStep in
@@ -182,6 +210,127 @@ struct CompanionPanelView: View {
         )
     }
 
+    @ViewBuilder
+    private var savedTaskControls: some View {
+        if case .waitingForConfirmation = jarvisAssistantManager.state {
+            VStack(alignment: .leading, spacing: 8) {
+                if let pendingToolCall = jarvisAssistantManager.resumableCheckpoint?.pendingConfirmationToolCall {
+                    Text(pendingToolCall.userVisibleSummary)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let terminalCommand = pendingToolCall.arguments["command"]?.stringValue {
+                        Text(terminalCommand)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(DS.Colors.warning)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text("Allow for task lets later terminal commands run without another prompt until this task ends, is stopped, or is discarded.")
+                            .font(.system(size: 9))
+                            .foregroundColor(DS.Colors.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    Button("Allow once") {
+                        Task {
+                            await jarvisAssistantManager.confirmPendingActionAndResume()
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundColor(DS.Colors.textOnAccent)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.small, style: .continuous)
+                            .fill(DS.Colors.accent)
+                    )
+                    .pointerCursor()
+
+                    if jarvisAssistantManager.resumableCheckpoint?
+                        .pendingConfirmationToolCall?.toolName == "run_terminal_command" {
+                        Button("Allow for task") {
+                            Task {
+                                await jarvisAssistantManager.approveTerminalAccessForTaskAndResume()
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundColor(DS.Colors.warning)
+                        .pointerCursor()
+                    }
+
+                    Button("Cancel task") {
+                        jarvisAssistantManager.discardSavedTask()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(DS.Colors.textSecondary)
+                    .pointerCursor()
+                }
+            }
+        } else if jarvisStateLabel != "Running" {
+            HStack(spacing: 8) {
+                Button("Resume task") {
+                    Task {
+                        await jarvisAssistantManager.resumeSavedTask()
+                    }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundColor(DS.Colors.accentText)
+                .pointerCursor()
+
+                Button("Discard") {
+                    jarvisAssistantManager.discardSavedTask()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundColor(DS.Colors.textTertiary)
+                .pointerCursor()
+            }
+        }
+    }
+
+    private var internetSourcesSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("INTERNET SOURCES")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundColor(DS.Colors.textTertiary)
+
+            ForEach(companionManager.lastInternetSources) { internetSource in
+                Link(destination: internetSource.url) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "link")
+                            .font(.system(size: 9, weight: .medium))
+                        Text(internetSource.title)
+                            .font(.system(size: 10, design: .monospaced))
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 8, weight: .medium))
+                    }
+                    .foregroundColor(DS.Colors.accentText)
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .fill(Color.white.opacity(0.03))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+        )
+    }
+
     private var canRunJarvisCommand: Bool {
         !jarvisCommandInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && jarvisStateLabel != "Running"
@@ -193,10 +342,12 @@ struct CompanionPanelView: View {
             return "Ready for local Mac control."
         case .planning:
             return "Planning command..."
+        case .paused(let userGoal, let nextStepNumber):
+            return "Saved at step \(nextStepNumber): \(userGoal)"
         case .executing(let currentStep, let totalSteps, let summary):
             return "Step \(currentStep)/\(totalSteps): \(summary)"
-        case .waitingForConfirmation(_, let reason):
-            return "Needs confirmation: \(reason)"
+        case .waitingForConfirmation(let toolCall, let reason):
+            return "Needs confirmation for \(toolCall.userVisibleSummary): \(reason)"
         case .completed(let message):
             return message
         case .failed(let message):
@@ -210,6 +361,8 @@ struct CompanionPanelView: View {
             return "Ready"
         case .planning, .executing:
             return "Running"
+        case .paused:
+            return "Paused"
         case .waitingForConfirmation:
             return "Confirm"
         case .completed:
@@ -225,6 +378,8 @@ struct CompanionPanelView: View {
             return DS.Colors.textTertiary
         case .planning, .executing:
             return DS.Colors.accentText
+        case .paused:
+            return DS.Colors.warning
         case .waitingForConfirmation:
             return DS.Colors.warning
         case .completed:
@@ -238,9 +393,7 @@ struct CompanionPanelView: View {
         let commandToRun = jarvisCommandInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !commandToRun.isEmpty else { return }
 
-        Task {
-            await jarvisAssistantManager.runTextCommand(commandToRun)
-        }
+        companionManager.submitTextRequest(commandToRun)
     }
 
     private func iconName(for status: JarvisWorkflowStepStatus) -> String {
@@ -320,7 +473,9 @@ struct CompanionPanelView: View {
     @ViewBuilder
     private var permissionsCopySection: some View {
         if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
-            Text("Hold Control+Option to talk.")
+            Text(companionManager.isAlwaysListeningEnabled
+                 ? "Always listening. Speak naturally, or hold Control+Option."
+                 : "Hold Control+Option to talk.")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(DS.Colors.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -363,7 +518,7 @@ struct CompanionPanelView: View {
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text("Permissions are handled locally. Screen and audio input are only processed when the push-to-talk key is active. All commands run in-process.")
+                Text("Permissions are handled locally. Voice audio is processed while push-to-talk or Always Listen is active. Screen capture happens only when Jarvis needs visual context.")
                     .font(.system(size: 11))
                     .foregroundColor(DS.Colors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -739,6 +894,45 @@ struct CompanionPanelView: View {
 
 
     // MARK: - Show Clicky Cursor Toggle
+
+    private var alwaysListeningToggleRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: companionManager.isAlwaysListeningActive ? "waveform.circle.fill" : "waveform.circle")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundColor(companionManager.isAlwaysListeningActive ? DS.Colors.accentText : DS.Colors.textTertiary)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Always listen")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+                Text(companionManager.isAlwaysListeningActive ? "Listening for your next request" : "Automatically detects when you finish speaking")
+                    .font(.system(size: 9))
+                    .foregroundColor(DS.Colors.textTertiary)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: Binding(
+                get: { companionManager.isAlwaysListeningEnabled },
+                set: { companionManager.setAlwaysListeningEnabled($0) }
+            ))
+            .toggleStyle(.switch)
+            .labelsHidden()
+            .tint(DS.Colors.accent)
+            .scaleEffect(0.8)
+            .pointerCursor()
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .fill(Color.white.opacity(0.03))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+        )
+    }
 
     private var showClickyCursorToggleRow: some View {
         HStack {
