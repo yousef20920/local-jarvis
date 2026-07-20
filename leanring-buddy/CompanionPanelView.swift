@@ -51,13 +51,6 @@ struct CompanionPanelView: View {
                 jarvisCommandSection
                     .padding(.horizontal, 16)
 
-                if !companionManager.lastInternetSources.isEmpty {
-                    Spacer()
-                        .frame(height: 12)
-
-                    internetSourcesSection
-                        .padding(.horizontal, 16)
-                }
             }
 
             if !companionManager.allPermissionsGranted {
@@ -294,41 +287,6 @@ struct CompanionPanelView: View {
                 .pointerCursor()
             }
         }
-    }
-
-    private var internetSourcesSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("INTERNET SOURCES")
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .foregroundColor(DS.Colors.textTertiary)
-
-            ForEach(companionManager.lastInternetSources) { internetSource in
-                Link(destination: internetSource.url) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "link")
-                            .font(.system(size: 9, weight: .medium))
-                        Text(internetSource.title)
-                            .font(.system(size: 10, design: .monospaced))
-                            .lineLimit(1)
-                        Spacer(minLength: 0)
-                        Image(systemName: "arrow.up.right")
-                            .font(.system(size: 8, weight: .medium))
-                    }
-                    .foregroundColor(DS.Colors.accentText)
-                }
-                .buttonStyle(.plain)
-                .pointerCursor()
-            }
-        }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                .fill(Color.white.opacity(0.03))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
-        )
     }
 
     private var canRunJarvisCommand: Bool {

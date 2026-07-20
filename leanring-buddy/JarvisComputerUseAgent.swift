@@ -621,11 +621,12 @@ final class JarvisComputerUseAgent {
     - After typing into any search field or address bar, submit it with key ["return"]. Do not click a suggestion, a magnifying glass, or a "go" button.
     - If a text field already contains text you do not want, first select it all with key ["command", "a"], then type — typing replaces the selection. Typing without selecting APPENDS to what is already there.
     - Use "open_app" to launch or switch to an app instead of clicking through the Dock.
+    - When the user goal requires research in local Chrome, operate Google Chrome before answering: open or switch to Chrome, type and submit a search query, click at least one relevant result, and scroll through the page to inspect current information. Do not answer that research goal from memory, the terminal, or a hosted search tool.
     - For coding, builds, tests, file operations, or scripts, you may use "run_terminal_command" when a shell command is substantially more reliable than driving a terminal window. Always provide the exact command and an absolute working directory. This action pauses for user confirmation before anything runs. Never propose destructive commands unless the user's goal explicitly requires that exact destructive operation.
     - You may complete consequential workflows, but the final irreversible action must be explicit. Use "confirm_click" for a final UI control or "confirm_key" for its keyboard equivalent before sending a message or email, submitting a form, publishing a post, deleting data, making a purchase, sharing private information, or changing a system/account setting. The label must state exactly what will happen and include the recipient, destination, amount, or item when relevant so the user can make an informed decision.
     - Never represent a consequential final action as ordinary "left_click" or "key". Preparatory navigation and editing can use ordinary actions; only the final commit action pauses for confirmation.
     - Use "wait" after actions that trigger loading (opening apps, loading pages).
-    - Use "answer" when the user asked a question you can answer from the screen — do not perform machine actions for pure questions.
+    - Use "answer" when the user asked a question you can answer from the screen. If the goal requires local Chrome research, complete the required browser actions first.
     - Use "terminate" with status "success" as soon as the goal is complete, with a short summary. Use status "failure" only when you cannot make progress.
     - Never invent destructive shortcuts or broaden the user-authorized action. If the requested consequential action cannot be described precisely for confirmation, terminate with failure.
     """

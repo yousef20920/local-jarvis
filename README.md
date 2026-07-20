@@ -10,7 +10,7 @@ The goal is to feel less like a chatbot and more like a secretary for your compu
 - Keeps push-to-talk available through Control+Option
 - Accepts text in the Linux window and terminal client
 - Understands spoken or typed commands
-- Grounds informational questions with a required live web search and shows clickable sources
+- Researches informational questions by visibly operating Google Chrome on the Mac
 - Captures every connected display before each computer-use action
 - Uses OpenAI GPT-5.5 to choose the next UI action
 - Executes macOS actions through mouse, keyboard, app, screenshot, and confirmation-gated terminal tools
@@ -33,13 +33,13 @@ Jarvis now has a GPT-backed observe-act loop:
 5. Execute the action.
 6. Repeat until the task is done, GPT answers, or the user stops the run. macOS also enforces 24-hour and 10,000-action runaway guards; Linux has no automatic step limit by default.
 
-Informational questions and information-seeking requests use the Responses API's hosted web-search tool with live access required, and Jarvis refuses to present the answer as grounded unless cited URLs are returned. The panel shows those citations as clickable source links. Screen-specific questions still use a current screenshot. Deterministic routing uses whole command phrases, so names such as “OpenAI” and words such as “research” are not mistaken for Open or Search computer commands.
+Informational questions and information-seeking requests use the same visible computer-use loop as other Mac work. Jarvis opens or switches to Google Chrome, types and submits a query, inspects the results, clicks a relevant page, scrolls through it, and only then answers from current information visible in the browser. Screen-specific questions still use a current screenshot. Deterministic routing uses whole command phrases, so names such as “OpenAI” and words such as “research” are not mistaken for Open or Search computer commands.
 
 Fast screen-independent commands such as opening apps, typing text, pressing hotkeys, searching, and taking screenshots run through deterministic rules. Visual or multi-step tasks go through the GPT-backed computer-use loop.
 
-Long computer-use runs can remain active for up to 24 hours and 10,000 actions. Jarvis prevents idle system sleep while a run is active, keeps listening for an interruption, and limits the panel to the latest 50 discovered actions so long workflows do not make the UI grow without bound. A side question gets its own short response task and does not cancel the computer work already underway; a second action is rejected until the current one finishes or the user says “Jarvis stop.”
+Long computer-use runs can remain active for up to 24 hours and 10,000 actions. Jarvis prevents idle system sleep while a run is active, keeps listening for an interruption, and limits the panel to the latest 50 discovered actions so long workflows do not make the UI grow without bound. A screen question gets its own short response task and does not cancel the computer work already underway. Local Chrome research needs the mouse and keyboard, so it is rejected like any other second action until the current task finishes or the user says “Jarvis stop.”
 
-Screen capture, cited web research, and transient GPT failures use bounded exponential retries. Computer-use retries cover observation and reasoning only—Jarvis never automatically replays a mouse, keyboard, submission, or terminal side effect because its result was interrupted.
+Screen capture and transient GPT failures use bounded exponential retries. Computer-use retries cover observation and reasoning only—Jarvis never automatically replays a mouse, keyboard, submission, or terminal side effect because its result was interrupted.
 
 Jarvis persists the current goal, recent action history, next step, and pending confirmation before each side effect. If the app closes or a run is interrupted, the panel offers Resume and Discard controls. Actions recorded as started are treated as potentially completed, so a resumed run observes the current machine state instead of blindly replaying them.
 
@@ -69,7 +69,7 @@ Core app pieces:
 - User-controlled Always Listen mode that pauses during Jarvis speech and resumes automatically
 - ScreenCaptureKit screenshots for every connected display on each agent iteration, with coordinates mapped per display
 - Worker-backed GPT-5.5 agent for visual computer use
-- Required Responses API web search for source-backed informational answers
+- Visible local Chrome research for informational answers
 - Durable computer-use checkpoints with restart-safe resume and discard controls
 - Optional panel-approved terminal autonomy scoped to one saved task for unattended coding workflows
 - Independent short-answer and long-running task lifetimes, so Jarvis can answer while it keeps working

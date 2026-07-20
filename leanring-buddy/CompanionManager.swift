@@ -23,7 +23,6 @@ enum CompanionVoiceState: Equatable {
 
 @MainActor
 final class CompanionManager: ObservableObject {
-    private static let maximumWebResearchAttemptCount = 4
     @Published private(set) var voiceState: CompanionVoiceState = .idle
     @Published private(set) var lastTranscript: String?
     @Published private(set) var currentAudioPowerLevel: CGFloat = 0
@@ -31,7 +30,6 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var hasScreenRecordingPermission = false
     @Published private(set) var hasMicrophonePermission = false
     @Published private(set) var hasScreenContentPermission = false
-    @Published private(set) var lastInternetSources: [JarvisInternetSource] = []
 
     /// Screen location (global AppKit coords) of a detected UI element the
     /// buddy should fly to and point at. Parsed from the vision response;
@@ -629,8 +627,6 @@ final class CompanionManager: ObservableObject {
 
         currentResponseTask?.cancel()
         localSpeechSynthesizer?.stopSpeaking()
-        lastInternetSources = []
-
         currentResponseTask = Task {
             voiceState = .processing
             let intentDecision = await voiceIntentRouter.route(transcript: transcript)
@@ -640,8 +636,24 @@ final class CompanionManager: ObservableObject {
                 return
             }
 
-            if intentDecision.route == .webResearch {
-                await answerQuestionFromInternet(intentDecision.visionPrompt)
+            if intentDecision.route == .localChromeResearch {
+                JarvisDebugLogger.log(
+                    "Voice",
+                    "local Chrome research: \"\(intentDecision.visionPrompt)\""
+                )
+                let didStartTask = startLongRunningJarvisTask { [weak self] in
+                    guard let self else { return "Jarvis stopped before Chrome research began." }
+                    return await self.jarvisAssistantManager.runLocalChromeResearch(
+                        question: intentDecision.visionPrompt
+                    )
+                }
+                if !didStartTask {
+                    await speakJarvisStatus("I'm still working on the current task. Say Jarvis stop before asking me to use Chrome for another task.")
+                    if !Task.isCancelled {
+                        voiceState = .idle
+                        scheduleTransientHideIfNeeded()
+                    }
+                }
                 return
             }
 
@@ -829,53 +841,6 @@ final class CompanionManager: ObservableObject {
         guard !trimmedRequestText.isEmpty else { return }
         lastTranscript = trimmedRequestText
         runJarvisCommandFromVoice(transcript: trimmedRequestText)
-    }
-
-    private func answerQuestionFromInternet(_ question: String) async {
-        JarvisDebugLogger.log("Voice", "web research: \"\(question)\"")
-        lastInternetSources = []
-
-        do {
-            let historyForAPI = conversationHistory.map { entry in
-                (userText: entry.userTranscript, assistantText: entry.assistantResponse)
-            }
-            let webGroundedAnswer = try await JarvisComputerUseAgent.performRetriableOperation(
-                operationName: "cited web research",
-                maximumAttemptCount: Self.maximumWebResearchAttemptCount,
-                isCancelled: { false },
-                shouldRetry: JarvisComputerUseAgent.shouldRetryModelRequest
-            ) {
-                try await self.openAIVisionClient.generateWebGroundedAnswer(
-                    userPrompt: question,
-                    conversationHistory: historyForAPI
-                )
-            }
-            guard !Task.isCancelled else { return }
-
-            lastInternetSources = webGroundedAnswer.sources
-            conversationHistory.append((
-                userTranscript: question,
-                assistantResponse: webGroundedAnswer.spokenAnswer
-            ))
-            if conversationHistory.count > 10 {
-                conversationHistory.removeFirst(conversationHistory.count - 10)
-            }
-
-            await speakJarvisStatus(webGroundedAnswer.spokenAnswer)
-        } catch is CancellationError {
-            return
-        } catch {
-            if Self.isCancellationError(error) {
-                return
-            }
-            JarvisDebugLogger.log("Voice", "web research failed: \(error.localizedDescription)")
-            await speakJarvisStatus("I couldn't verify that on the internet right now.")
-        }
-
-        if !Task.isCancelled {
-            voiceState = .idle
-            scheduleTransientHideIfNeeded()
-        }
     }
 
     private func shouldStopJarvis(for transcript: String) -> Bool {

@@ -248,13 +248,13 @@ struct leanring_buddyTests {
         #expect(JarvisVoiceIntentRouter.hasExplicitControlCommand("please search for local restaurants"))
     }
 
-    @Test func informationalImperativesUseInternetResearchFallback() {
+    @Test func informationalImperativesUseLocalChromeResearchFallback() {
         let fallbackDecision = JarvisVoiceIntentRouter.fallbackDecision(
             for: "Research the latest battery technology",
             reason: "router unavailable"
         )
 
-        #expect(fallbackDecision.route == .webResearch)
+        #expect(fallbackDecision.route == .localChromeResearch)
         #expect(fallbackDecision.visionPrompt == "Research the latest battery technology")
     }
 
@@ -264,8 +264,31 @@ struct leanring_buddyTests {
             fallbackTranscript: "What is OpenAI?"
         )
 
-        #expect(correctedDecision.route == .webResearch)
+        #expect(correctedDecision.route == .localChromeResearch)
         #expect(correctedDecision.visionPrompt == "What is OpenAI?")
+    }
+
+    @Test @MainActor func localChromeResearchCommandRequiresVisibleBrowserInteractions() {
+        let researchCommand = JarvisAssistantManager.localChromeResearchCommand(
+            for: "Find the cheapest current price"
+        )
+
+        #expect(researchCommand.contains("Google Chrome"))
+        #expect(researchCommand.contains("type a useful search query"))
+        #expect(researchCommand.contains("click at least one relevant result"))
+        #expect(researchCommand.contains("scroll through the page"))
+        #expect(researchCommand.contains("Find the cheapest current price"))
+        #expect(JarvisRuleBasedPlanner.commandNeedsScreenContext(researchCommand))
+    }
+
+    @Test func searchFollowedByAnAnswerUsesLocalChromeResearch() {
+        let correctedDecision = JarvisVoiceIntentRouter.parseDecision(
+            responseText: #"{"route":"action_then_vision","action_command":"search for current battery prices","vision_prompt":"tell me which is cheapest","reason":"search plus answer"}"#,
+            fallbackTranscript: "Search for current battery prices and tell me which is cheapest"
+        )
+
+        #expect(correctedDecision.route == .localChromeResearch)
+        #expect(correctedDecision.visionPrompt == "Search for current battery prices and tell me which is cheapest")
     }
 
     @Test @MainActor func taskTerminalApprovalDoesNotBypassOtherSafetyGates() {

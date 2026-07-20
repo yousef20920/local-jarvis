@@ -155,6 +155,23 @@ final class JarvisAssistantManager: ObservableObject {
         return await runComputerUseAgentLoop(for: trimmedUserCommand)
     }
 
+    @discardableResult
+    func runLocalChromeResearch(question: String) async -> String {
+        await runTextCommand(Self.localChromeResearchCommand(for: question))
+    }
+
+    nonisolated static func localChromeResearchCommand(for question: String) -> String {
+        let trimmedQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuestion.isEmpty else { return "" }
+
+        return """
+        Click through Google Chrome on this Mac to research this question:
+        \(trimmedQuestion)
+
+        Use the visible Chrome interface for the entire research task. Open or switch to Google Chrome, type a useful search query into Chrome, submit it, inspect the results, click at least one relevant result, and scroll through the page to gather the answer. Do not use a hosted or API web-search tool, the terminal, or model memory as a substitute for browsing. Only answer after the requested browser interactions and after reading current information visible in Chrome.
+        """
+    }
+
     func stop() {
         JarvisDebugLogger.log("Manager", "stop() — cancelling active workflow")
         activeWorkflowID = nil
