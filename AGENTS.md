@@ -5,9 +5,11 @@
 
 ## Overview
 
-Local Jarvis is a macOS menu bar assistant whose main goal is to behave like a local secretary for the user's computer. The user talks to it, Jarvis sees the current screen, decides what to do next, and operates macOS in front of the user by clicking, typing, scrolling, dragging, opening apps, pressing hotkeys, answering screen-aware questions, and carrying out longer workflows step by step.
+Local Jarvis is a macOS and Linux assistant whose main goal is to behave like a local secretary for the user's computer. The user gives it a voice or text command, Jarvis sees the current screen, decides what to do next, and operates the desktop in front of the user by clicking, typing, scrolling, dragging, opening apps, pressing hotkeys, answering screen-aware questions, and carrying out longer workflows step by step.
 
 The app lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Always Listen is enabled by default after onboarding and segments speech after a short silence; push-to-talk (ctrl+option) remains available. Transcripts route through internet research, the Jarvis computer-use flow, or the screen-aware GPT response path. GPT-5.5 runs through the Cloudflare Worker proxy using the OpenAI Responses API. A blue cursor overlay can fly to and point at UI elements Jarvis references on any connected monitor.
+
+The separate `linux/` Python client provides terminal and Tk window interfaces. It reuses the Worker and 768x768 observe-act protocol, captures the display under the pointer with MSS, and controls X11 through PyAutoGUI. Linux runs have no automatic step limit by default and expose a Stop Jarvis window for manual cancellation. Native Wayland control, voice input, the cursor overlay, and a tray indicator are not yet implemented on Linux.
 
 All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in the app.
 
@@ -24,6 +26,7 @@ All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in th
 - **Element Pointing**: GPT embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target.
 - **Concurrency**: `@MainActor` isolation, async/await throughout
 - **Analytics**: PostHog via `ClickyAnalytics.swift`
+- **Linux Client**: Python 3.10+, Tkinter interface, MSS capture, and PyAutoGUI X11 automation
 
 ### API Proxy (Cloudflare Worker)
 
@@ -104,6 +107,12 @@ Worker vars: `OPENAI_MODEL`, `ELEVENLABS_VOICE_ID`
 | `.github/workflows/macos-unit-tests.yml` | ~45 | GitHub Actions workflow using an ephemeral `macos-26` runner to resolve packages, compile the app, and run `leanring-buddyTests` with code signing disabled. |
 | `leanring-buddyTests/leanring_buddyTests.swift` | ~294 | Swift Testing regression suite covering permissions, checkpoint compatibility, terminal safety, retry behavior, multi-monitor action identity, consequential confirmations, and internet-routing corrections. |
 | `worker/src/index.ts` | ~166 | Cloudflare Worker proxy. Routes: `/responses` and `/chat` (OpenAI GPT-5.5 Responses API), `/tts` (ElevenLabs), `/transcribe-token` (AssemblyAI temp token). |
+| `linux/src/local_jarvis_linux/agent.py` | ~380 | Linux observe-act loop, model action parsing, coordinate mapping, and repeated-pointer loop guard. |
+| `linux/src/local_jarvis_linux/desktop.py` | ~235 | Linux multi-monitor capture and X11 mouse, keyboard, clipboard, scrolling, and app-launching backend. |
+| `linux/src/local_jarvis_linux/openai_client.py` | ~95 | Standard-library HTTP client for the existing Worker-backed Responses API route. |
+| `linux/src/local_jarvis_linux/cli.py` | ~130 | Linux command-line entry point, interactive prompt, environment check, and GUI launcher. |
+| `linux/src/local_jarvis_linux/gui.py` | ~155 | Small Tk command window with background agent execution, live step status, and manual cancellation control. |
+| `linux/tests/` | ~225 | Linux unit tests for configuration, unlimited and cancelled agent runs, model parsing, coordinate mapping, loop guards, and Responses API output extraction. |
 
 ## Build & Run
 
@@ -120,6 +129,19 @@ open leanring-buddy.xcodeproj
 **Do NOT run `xcodebuild` from the terminal** — it invalidates TCC (Transparency, Consent, and Control) permissions and the app will need to re-request screen recording, accessibility, etc.
 
 The exception is `.github/workflows/macos-unit-tests.yml`, which runs on a disposable GitHub-hosted Mac and therefore cannot invalidate permissions on the user's Mac. Use Xcode's Product > Test locally.
+
+### Linux
+
+```bash
+python3 -m venv .venv-linux
+. .venv-linux/bin/activate
+python3 -m pip install -e ./linux
+export JARVIS_RESPONSES_URL="http://127.0.0.1:8787/responses"
+local-jarvis --check
+local-jarvis --gui
+```
+
+Linux desktop automation currently requires an X11 session or usable XWayland `DISPLAY`. See `linux/README.md` for distro packages and limitations.
 
 ## Cloudflare Worker
 

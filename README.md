@@ -1,6 +1,6 @@
 # Local Jarvis
 
-Local Jarvis is a macOS assistant that lives on your machine and does work in front of you. You talk to it, it looks at the current screen, decides the next action, and uses the same basic controls a person would use: click, type, scroll, drag, open apps, press hotkeys, wait, and answer questions about what it sees.
+Local Jarvis is a macOS and Linux assistant that lives on your machine and does work in front of you. You give it a command, it looks at the current screen, decides the next action, and uses the same basic controls a person would use: click, type, scroll, drag, open apps, press hotkeys, wait, and answer questions about what it sees.
 
 The goal is to feel less like a chatbot and more like a secretary for your computer: ask it to book something, fill something out, find information, operate an app, or complete a long workflow, then watch it carry out the task step by step.
 
@@ -8,28 +8,30 @@ The goal is to feel less like a chatbot and more like a secretary for your compu
 
 - Always listens after onboarding, automatically submitting speech after a short silence
 - Keeps push-to-talk available through Control+Option
+- Accepts text in the Linux window and terminal client
 - Understands spoken or typed commands
 - Grounds informational questions with a required live web search and shows clickable sources
 - Captures every connected display before each computer-use action
 - Uses OpenAI GPT-5.5 to choose the next UI action
 - Executes macOS actions through mouse, keyboard, app, screenshot, and confirmation-gated terminal tools
 - Saves long-running task checkpoints and can safely resume or discard them after an app restart
+- Executes Linux actions through mouse, keyboard, app, and screenshot tools
 - Speaks back with a concise result
 - Shows a floating cursor overlay while it works
 - Keeps API keys out of the app by routing model calls through a Cloudflare Worker
 
 ## Current State
 
-The app is a Swift/SwiftUI macOS prototype built from the original Clicky codebase and reshaped into a Jarvis-first computer-use assistant.
+The project has a Swift/SwiftUI macOS client and a text-first Python Linux client. Both use the same Cloudflare Worker and GPT-backed observe–act protocol.
 
 Jarvis now has a GPT-backed observe-act loop:
 
 1. Capture a fresh screenshot.
 2. Ask GPT-5.5 for one next action through the Worker.
-3. Map model coordinates to the real macOS screen.
+3. Map model coordinates to the real desktop screen.
 4. Check the action against the safety policy.
 5. Execute the action.
-6. Repeat until the task is done, GPT answers, the user stops it, or the 24-hour/10,000-action runaway guards are reached.
+6. Repeat until the task is done, GPT answers, or the user stops the run. macOS also enforces 24-hour and 10,000-action runaway guards; Linux has no automatic step limit by default.
 
 Informational questions and information-seeking requests use the Responses API's hosted web-search tool with live access required, and Jarvis refuses to present the answer as grounded unless cited URLs are returned. The panel shows those citations as clickable source links. Screen-specific questions still use a current screenshot. Deterministic routing uses whole command phrases, so names such as “OpenAI” and words such as “research” are not mistaken for Open or Search computer commands.
 
@@ -50,6 +52,7 @@ Jarvis can also complete consequential human workflows instead of stopping short
 ```text
 leanring-buddy/          macOS Swift/SwiftUI app source
 leanring-buddy.xcodeproj Xcode project
+linux/                   Python Linux desktop client, tests, and setup guide
 worker/                  Cloudflare Worker proxy for OpenAI, AssemblyAI, and ElevenLabs
 scripts/                 Release/helper scripts from the upstream app
 .github/workflows/       Ephemeral macOS compilation and unit-test CI
@@ -75,6 +78,8 @@ Core app pieces:
 - OpenAI Responses API, AssemblyAI transcription tokens, and ElevenLabs TTS through the Cloudflare Worker proxy
 - Transparent overlay window for cursor animation, response text, and workflow feedback
 
+The Linux client provides a small Tk window and terminal interface, uses MSS for multi-monitor capture, and PyAutoGUI for X11 mouse and keyboard control. See [`linux/README.md`](linux/README.md) for setup and current Wayland limitations.
+
 ## OpenAI Runtime
 
 The macOS app does not store or call with an OpenAI API key directly. It calls the Cloudflare Worker route configured by `JarvisOpenAIResponsesProxyURL`.
@@ -99,7 +104,7 @@ The non-secret model setting lives in `worker/wrangler.toml`:
 OPENAI_MODEL = "gpt-5.5"
 ```
 
-## Build And Run
+## Build And Run on macOS
 
 Open the project in Xcode:
 
@@ -117,6 +122,21 @@ Known non-blocking warnings:
 
 - Swift 6 concurrency warnings
 - Deprecated `onChange` warning in `OverlayWindow.swift`
+
+## Install And Run on Linux
+
+The Linux client currently targets X11. From the repository root:
+
+```bash
+python3 -m venv .venv-linux
+. .venv-linux/bin/activate
+python3 -m pip install -e ./linux
+export JARVIS_RESPONSES_URL="http://127.0.0.1:8787/responses"
+local-jarvis --check
+local-jarvis --gui
+```
+
+See [`linux/README.md`](linux/README.md) for distro packages, terminal usage, and Wayland details.
 
 ## Cloudflare Worker
 
@@ -139,7 +159,7 @@ Worker routes:
 
 ## Project Direction
 
-The north star is a fast Jarvis for macOS: a voice-first assistant that can safely operate the visible computer, adapt as the screen changes, and complete real workflows instead of only explaining what to do.
+The north star is a fast, local-feeling Jarvis across desktop platforms: an assistant that can safely operate the visible computer, adapt as the screen changes, and complete real workflows instead of only explaining what to do. The macOS client remains voice-first; Linux currently supports text commands while voice and overlay parity are still in progress.
 
 ## Attribution
 
