@@ -78,7 +78,7 @@ struct JarvisRunTerminalCommandTool: JarvisTool {
             guard !Task.isCancelled else {
                 return .failure(CancellationError())
             }
-            await withCheckedContinuation { continuation in
+            await withCheckedContinuation { (continuation: CheckedContinuation<Result<Int32, Error>, Never>) in
                 process.terminationHandler = { completedProcess in
                     continuation.resume(returning: .success(completedProcess.terminationStatus))
                 }

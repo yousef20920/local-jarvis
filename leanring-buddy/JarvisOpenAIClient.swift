@@ -39,20 +39,6 @@ enum JarvisOpenAIClientError: LocalizedError {
     }
 }
 
-struct JarvisInternetSource: Equatable, Identifiable {
-    let title: String
-    let url: URL
-
-    var id: String {
-        url.absoluteString
-    }
-}
-
-struct JarvisWebGroundedAnswer: Equatable {
-    let spokenAnswer: String
-    let sources: [JarvisInternetSource]
-}
-
 final class JarvisOpenAIClient {
     private let responsesProxyURLString: String
     private let session: URLSession
@@ -143,65 +129,6 @@ final class JarvisOpenAIClient {
             requiresJSONOutput: false,
             reasoningEffort: "low",
             textVerbosity: "low"
-        )
-    }
-
-    /// Answers an informational question with a required live web search.
-    /// Browser automation remains available for user-directed browsing tasks;
-    /// this path is for fast, source-backed spoken answers.
-    func generateWebGroundedAnswer(
-        userPrompt: String,
-        conversationHistory: [(userText: String, assistantText: String)]
-    ) async throws -> JarvisWebGroundedAnswer {
-        var input: [[String: Any]] = [
-            [
-                "role": "system",
-                "content": """
-                You are Jarvis, a concise voice assistant. You must use live web search before answering.
-                Answer only with claims supported by the web results from this request. If the sources do not support a reliable answer, say that you could not verify it instead of filling gaps from memory.
-                Write one or two natural spoken sentences unless the user asks for detail. Mention useful source or publication names naturally. Do not use markdown, bullet points, raw URLs, or citation markup because the answer will be spoken aloud. The app displays the clickable sources separately.
-                """
-            ]
-        ]
-
-        for historyEntry in conversationHistory.suffix(5) {
-            input.append(["role": "user", "content": historyEntry.userText])
-            input.append(["role": "assistant", "content": historyEntry.assistantText])
-        }
-        input.append(["role": "user", "content": userPrompt])
-
-        let body: [String: Any] = [
-            "input": input,
-            "reasoning": ["effort": "low"],
-            "text": ["verbosity": "low"],
-            "tools": [[
-                "type": "web_search",
-                "external_web_access": true
-            ]],
-            // The product promise is that informational answers are grounded
-            // in the internet, so searching cannot be left to model choice.
-            "tool_choice": "required",
-            "include": ["web_search_call.action.sources"]
-        ]
-
-        let responseJSON = try await sendResponseRequest(body: body)
-        let answerText = Self.extractOutputText(from: responseJSON)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !answerText.isEmpty else {
-            throw JarvisOpenAIClientError.emptyResponse
-        }
-
-        let internetSources = Self.extractInternetSources(from: responseJSON)
-        guard !internetSources.isEmpty else {
-            // A search call without cited evidence is not strong enough to
-            // satisfy Jarvis' internet-grounding promise.
-            throw JarvisOpenAIClientError.emptyResponse
-        }
-
-        return JarvisWebGroundedAnswer(
-            spokenAnswer: Self.removingInlineCitationMarkers(from: answerText),
-            sources: internetSources
         )
     }
 
@@ -296,67 +223,6 @@ final class JarvisOpenAIClient {
         return textParts.joined()
     }
 
-    private static func extractInternetSources(from json: [String: Any]) -> [JarvisInternetSource] {
-        guard let outputItems = json["output"] as? [[String: Any]] else {
-            return []
-        }
-
-        var sources: [JarvisInternetSource] = []
-        var seenURLs = Set<String>()
-
-        for outputItem in outputItems {
-            guard let contentItems = outputItem["content"] as? [[String: Any]] else {
-                continue
-            }
-
-            for contentItem in contentItems {
-                guard let annotations = contentItem["annotations"] as? [[String: Any]] else {
-                    continue
-                }
-
-                for annotation in annotations where annotation["type"] as? String == "url_citation" {
-                    let citation = annotation["url_citation"] as? [String: Any] ?? annotation
-                    guard let urlString = citation["url"] as? String,
-                          let url = URL(string: urlString),
-                          seenURLs.insert(urlString).inserted else {
-                        continue
-                    }
-
-                    let citationTitle = (citation["title"] as? String)?
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    let displayTitle = citationTitle.flatMap { title in
-                        title.isEmpty ? nil : title
-                    } ?? url.host ?? "Source"
-                    sources.append(JarvisInternetSource(
-                        title: displayTitle,
-                        url: url
-                    ))
-                }
-            }
-        }
-
-        return Array(sources.prefix(5))
-    }
-
-    private static func removingInlineCitationMarkers(from answerText: String) -> String {
-        let citationPatterns = [
-            #"cite[^]*"#,
-            #"【[^】]*】"#
-        ]
-
-        var spokenAnswer = answerText
-        for citationPattern in citationPatterns {
-            spokenAnswer = spokenAnswer.replacingOccurrences(
-                of: citationPattern,
-                with: "",
-                options: .regularExpression
-            )
-        }
-
-        return spokenAnswer
-            .replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 }
 
 private extension String {

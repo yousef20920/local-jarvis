@@ -12,7 +12,7 @@ import Foundation
 enum JarvisVoiceIntentRoute: String {
     case action
     case vision
-    case webResearch = "web_research"
+    case localChromeResearch = "local_chrome_research"
     case actionThenVision = "action_then_vision"
 }
 
@@ -75,24 +75,24 @@ final class JarvisVoiceIntentRouter {
         Routes:
         action = control the Mac: open, search, google, look up, navigate, type, press, click, tap, scroll.
         vision = answer a question specifically about what is visible on the current screen.
-        web_research = answer any informational, factual, explanatory, recommendation, opinion, or current-events question using internet sources.
+        local_chrome_research = answer any informational, factual, explanatory, recommendation, opinion, price, or current-events question by visibly researching it in Google Chrome on the user's Mac.
         action_then_vision = do a Mac action first, then answer after it completes.
 
         Rules:
-        Route every informational question to web_research, even when it is not time-sensitive. Jarvis must ground answers in internet sources instead of model memory.
+        Route every informational question to local_chrome_research, even when it is not time-sensitive. Jarvis must open and operate the user's local Google Chrome instead of using model memory or a hosted search tool.
         Use vision only when the user is explicitly asking about the visible screen, such as "what do you see", "what does this error say", or "where is the save button".
-        For web_research, action_command is empty and vision_prompt is the user's complete original question.
-        If the transcript explicitly commands search/google/look up/open/navigate/type/press/click/tap/scroll, use action.
+        For local_chrome_research, action_command is empty and vision_prompt is the user's complete original question.
+        If the transcript explicitly commands search/google/look up/open/navigate/type/press/click/tap/scroll, use action unless it also asks Jarvis to report, compare, explain, or answer from the search; that combined search-and-answer request uses local_chrome_research.
         Use action_then_vision only when the same transcript explicitly asks for an action and a follow-up answer after it, such as "and tell me", "then explain", or "after that what does it say".
         For action_then_vision, action_command is only the action part; vision_prompt is only the follow-up answer request.
         For action, action_command repeats the transcript exactly.
 
         Examples:
-        what's the weather in Toronto today? -> {"route":"web_research","action_command":"","vision_prompt":"what's the weather in Toronto today?","reason":"internet-grounded question"}
-        what's the time in San Francisco? -> {"route":"web_research","action_command":"","vision_prompt":"what's the time in San Francisco?","reason":"internet-grounded question"}
-        what is better, skyscraper grey or dravit grey on a BMW? -> {"route":"web_research","action_command":"","vision_prompt":"what is better, skyscraper grey or dravit grey on a BMW?","reason":"internet-grounded recommendation"}
+        what's the weather in Toronto today? -> {"route":"local_chrome_research","action_command":"","vision_prompt":"what's the weather in Toronto today?","reason":"research in local Chrome"}
+        what's the time in San Francisco? -> {"route":"local_chrome_research","action_command":"","vision_prompt":"what's the time in San Francisco?","reason":"research in local Chrome"}
+        what is better, skyscraper grey or dravit grey on a BMW? -> {"route":"local_chrome_research","action_command":"","vision_prompt":"what is better, skyscraper grey or dravit grey on a BMW?","reason":"research recommendation in local Chrome"}
         search for a Porsche 911 white colour -> {"route":"action","action_command":"search for a Porsche 911 white colour","vision_prompt":"","reason":"search command"}
-        search up cat and tell me what it says -> {"route":"action_then_vision","action_command":"search up cat","vision_prompt":"tell me what the current page says about cat","reason":"action plus answer"}
+        search up cat and tell me what it says -> {"route":"local_chrome_research","action_command":"","vision_prompt":"search up cat and tell me what it says","reason":"search and answer through local Chrome"}
         open chrome and go to youtube.com -> {"route":"action","action_command":"open chrome and go to youtube.com","vision_prompt":"","reason":"control"}
         click on the Apple video -> {"route":"action","action_command":"click on the Apple video","vision_prompt":"","reason":"control"}
         do you see WWDC? -> {"route":"vision","action_command":"","vision_prompt":"do you see WWDC?","reason":"screen question"}
@@ -129,12 +129,12 @@ final class JarvisVoiceIntentRouter {
         case .action:
             if !hasExplicitControlCommand && isInformationalRequest {
                 return JarvisVoiceIntentDecision(
-                    route: .webResearch,
+                    route: .localChromeResearch,
                     actionCommand: "",
                     visionPrompt: fallbackTranscript,
                     reason: reason.isEmpty
-                        ? "question corrected to web research"
-                        : reason + " (question — corrected to web research)"
+                        ? "question corrected to local Chrome research"
+                        : reason + " (question — corrected to local Chrome research)"
                 )
             }
 
@@ -147,12 +147,12 @@ final class JarvisVoiceIntentRouter {
         case .vision:
             if isInformationalRequest && !Self.isScreenContextQuestion(normalizedFallback) {
                 return JarvisVoiceIntentDecision(
-                    route: .webResearch,
+                    route: .localChromeResearch,
                     actionCommand: "",
                     visionPrompt: fallbackTranscript,
                     reason: reason.isEmpty
-                        ? "informational question corrected to web research"
-                        : reason + " (informational question — corrected to web research)"
+                        ? "informational question corrected to local Chrome research"
+                        : reason + " (informational question — corrected to local Chrome research)"
                 )
             }
 
@@ -162,9 +162,9 @@ final class JarvisVoiceIntentRouter {
                 visionPrompt: visionPrompt.isEmpty ? fallbackTranscript : visionPrompt,
                 reason: reason
             )
-        case .webResearch:
+        case .localChromeResearch:
             return JarvisVoiceIntentDecision(
-                route: .webResearch,
+                route: .localChromeResearch,
                 actionCommand: "",
                 visionPrompt: visionPrompt.isEmpty ? fallbackTranscript : visionPrompt,
                 reason: reason
@@ -173,12 +173,12 @@ final class JarvisVoiceIntentRouter {
             if actionCommand.isEmpty {
                 if isInformationalRequest && !Self.isScreenContextQuestion(normalizedFallback) {
                     return JarvisVoiceIntentDecision(
-                        route: .webResearch,
+                        route: .localChromeResearch,
                         actionCommand: "",
                         visionPrompt: visionPrompt.isEmpty ? fallbackTranscript : visionPrompt,
                         reason: reason.isEmpty
-                            ? "question corrected to web research"
-                            : reason + " (no action — corrected to web research)"
+                            ? "question corrected to local Chrome research"
+                            : reason + " (no action — corrected to local Chrome research)"
                     )
                 }
 
@@ -194,12 +194,12 @@ final class JarvisVoiceIntentRouter {
 
             if !hasExplicitControlCommand {
                 return JarvisVoiceIntentDecision(
-                    route: .webResearch,
+                    route: .localChromeResearch,
                     actionCommand: "",
                     visionPrompt: visionPrompt.isEmpty ? fallbackTranscript : visionPrompt,
                     reason: reason.isEmpty
-                        ? "question corrected to web research"
-                        : reason + " (question — corrected to web research)"
+                        ? "question corrected to local Chrome research"
+                        : reason + " (question — corrected to local Chrome research)"
                 )
             }
 
@@ -215,6 +215,17 @@ final class JarvisVoiceIntentRouter {
                     reason: reason.isEmpty
                         ? "action_then_vision without follow-up question downgraded to action"
                         : reason + " (no follow-up question — downgraded to action)"
+                )
+            }
+
+            if Self.hasExplicitBrowserSearchCommand(normalizedFallback) {
+                return JarvisVoiceIntentDecision(
+                    route: .localChromeResearch,
+                    actionCommand: "",
+                    visionPrompt: fallbackTranscript,
+                    reason: reason.isEmpty
+                        ? "search plus answer routed to local Chrome research"
+                        : reason + " (search plus answer — routed to local Chrome research)"
                 )
             }
 
@@ -240,10 +251,10 @@ final class JarvisVoiceIntentRouter {
 
         if isInformationalRequest(normalizedTranscript) && !isScreenContextQuestion(normalizedTranscript) {
             return JarvisVoiceIntentDecision(
-                route: .webResearch,
+                route: .localChromeResearch,
                 actionCommand: "",
                 visionPrompt: transcript,
-                reason: reason + " — web research fallback"
+                reason: reason + " — local Chrome research fallback"
             )
         }
 
@@ -281,6 +292,16 @@ final class JarvisVoiceIntentRouter {
             "open", "search", "google", "look up", "lookup", "navigate",
             "go to", "type", "press", "click", "tap", "scroll"
         ].contains { commandPhrase in
+            let escapedCommandPhrase = NSRegularExpression.escapedPattern(for: commandPhrase)
+            return normalizedTranscript.range(
+                of: #"\b"# + escapedCommandPhrase + #"\b"#,
+                options: .regularExpression
+            ) != nil
+        }
+    }
+
+    private static func hasExplicitBrowserSearchCommand(_ normalizedTranscript: String) -> Bool {
+        ["search", "google", "look up", "lookup"].contains { commandPhrase in
             let escapedCommandPhrase = NSRegularExpression.escapedPattern(for: commandPhrase)
             return normalizedTranscript.range(
                 of: #"\b"# + escapedCommandPhrase + #"\b"#,
