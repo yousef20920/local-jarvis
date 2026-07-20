@@ -268,7 +268,7 @@ struct leanring_buddyTests {
         #expect(correctedDecision.visionPrompt == "What is OpenAI?")
     }
 
-    @Test func localChromeResearchCommandRequiresVisibleBrowserInteractions() {
+    @Test @MainActor func localChromeResearchCommandRequiresVisibleBrowserInteractions() {
         let researchCommand = JarvisAssistantManager.localChromeResearchCommand(
             for: "Find the cheapest current price"
         )
