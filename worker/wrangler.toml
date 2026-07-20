@@ -5,3 +5,6 @@ compatibility_date = "2024-01-01"
 [vars]
 ELEVENLABS_VOICE_ID = "kPzsL2i3teMYv0FxEYQ6"
 OPENAI_MODEL = "gpt-5.5"
+
+[secrets]
+required = ["OPENAI_API_KEY"]
